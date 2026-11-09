@@ -1,0 +1,99 @@
+name: Apple Auris APK
+
+# Builds the Apple Auris dev APK on GitHub's Android runner. No VPS, no local
+# SDK required: JDK and the Android SDK are provisioned by the runner, and the
+# signing key is the repository's ANDROID_KEYSTORE_B64 secret.
+on:
+  workflow_dispatch:
+  push:
+    branches: [feature/automix-core-v2]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "Banner.png"
+      - "BANNER.png"
+      - "Logo.png"
+      - "LOGO.png"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apple-auris-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build signed Apple Auris APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+          cache: gradle
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Write local.properties
+        run: |
+          {
+            echo "sdk.dir=${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+            echo "LASTFM_API_KEY=${{ secrets.LASTFM_API_KEY }}"
+            echo "LASTFM_SECRET=${{ secrets.LASTFM_SECRET }}"
+          } > local.properties
+
+      - name: Decode signing key
+        run: |
+          set -euo pipefail
+          test -n "${{ secrets.ANDROID_KEYSTORE_B64 }}"
+          echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 -d > bitchord-fork.jks
+          {
+            echo "storeFile=bitchord-fork.jks"
+            echo "storePassword=android"
+            echo "keyAlias=forkdebug"
+            echo "keyPassword=android"
+          } > keystore.properties
+          chmod 600 bitchord-fork.jks keystore.properties
+
+      - run: chmod +x gradlew
+
+      - name: Build
+        run: ./gradlew :app:assembleDevRelease --stacktrace --console=plain
+
+      - name: Verify APK package and signature
+        run: |
+          set -euo pipefail
+          bt="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          apks=(app/build/outputs/apk/dev/release/*.apk)
+          test "${#apks[@]}" -gt 0
+          for apk in "${apks[@]}"; do
+            echo "== $apk"
+            "$bt/aapt2" dump badging "$apk" | grep -E "^package:" | head -1
+            "$bt/aapt2" dump badging "$apk" | grep -q "package: name='com.dev.bitchord'"
+            "$bt/aapt2" dump badging "$apk" | grep -q "versionCode='122'"
+            "$bt/apksigner" verify --print-certs "$apk" | grep -i "sha-256" | head -1
+          done
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apple-auris-apk
+          path: app/build/outputs/apk/dev/release/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Draft a GitHub release
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apple-auris-${{ github.run_number }}
+          name: Apple Auris APK build ${{ github.run_number }}
+          draft: true
+          prerelease: true
+          generate_release_notes: true
+          files: app/build/outputs/apk/dev/release/*.apk

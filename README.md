@@ -6,6 +6,8 @@
 
 # Auris
 
+> **This is the Apple Auris fork.** See [APPLE_AURIS.md](APPLE_AURIS.md) for the fork-specific APK build, signing, and addon/Atmos changes. The upstream project and credits below are preserved.
+
 ### A lossless-first Android music player, rebuilt from BitChord
 
 <br/>

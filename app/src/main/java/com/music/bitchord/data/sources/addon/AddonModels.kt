@@ -209,6 +209,29 @@ data class AddonTrack(
         get() = atmos == true || ATMOS_HINT.containsMatchIn(
             "$audioQuality ${audioMode.orEmpty()} ${audioModes.joinToString(" ")} $format",
         )
+
+    /**
+     * Whether this row positively declares a stereo-only mix.
+     *
+     * Only explicit metadata counts: `atmos=false`, `audioMode=STEREO`, or a
+     * `STEREO` entry in `audioModes` with no immersive entry beside it. A row
+     * that says nothing stays unknown, because guessing "stereo" there would
+     * skip the Atmos rung on exactly the addon that publishes no mode at all
+     * and only answers the question at `/stream`.
+     *
+     * The addon source uses this to avoid one `/stream` round trip on every
+     * ordinary track while Atmos is enabled: the row the listener tapped is
+     * already telling us the answer.
+     */
+    val isStereoOnly: Boolean
+        get() {
+            if (isDolbyAtmos) return false
+            if (atmos == false) return true
+            if (audioMode?.trim()?.equals("STEREO", ignoreCase = true) == true) return true
+            val hasStereoMode = audioModes.any { it.trim().equals("STEREO", ignoreCase = true) }
+            val hasImmersiveMode = audioModes.any { ATMOS_HINT.containsMatchIn(it) }
+            return hasStereoMode && !hasImmersiveMode
+        }
 }
 
 /**

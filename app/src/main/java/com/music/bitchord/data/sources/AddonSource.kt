@@ -250,7 +250,11 @@ class AddonSource(
             // so a failed Atmos+FLAC attempt still ends on the best stereo copy
             // this addon has rather than on YouTube.
             var settleFor: SourceStream? = null
-            for (tier in tiersFor(request)) {
+            val knownStereo = rows[trackId]?.isStereoOnly == true
+            if (knownStereo) {
+                TrackLog.d(TAG, "${config.displayName}: $trackId is stereo-only; skipping the Atmos rung")
+            }
+            for (tier in tiersFor(request, knownStereo)) {
                 val result = client.stream(trackId, tier)
                 val answer = result.getOrNull()
                 val stream = when {
@@ -311,9 +315,12 @@ class AddonSource(
      * the only rung that names the hi-res copy. `high` is last and only reached
      * when nothing above it answered; it is the floor, not a peer.
      */
-    private fun tiersFor(request: StreamRequest): List<String> = when {
+    private fun tiersFor(
+        request: StreamRequest,
+        knownStereo: Boolean,
+    ): List<String> = when {
         request !is StreamRequest.Lossless -> listOf(request.tier)
-        atmosWanted() -> listOf(
+        atmosWanted() && !knownStereo -> listOf(
             AddonClient.TIER_ATMOS,
             AddonClient.TIER_HI_RES,
             AddonClient.TIER_LOSSLESS,

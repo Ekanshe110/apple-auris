@@ -80,8 +80,8 @@ android {
         // Haze falls back to a translucent scrim below that.
         minSdk = 26
         targetSdk = 36
-        versionCode = 121
-        versionName = "3.0.21"
+        versionCode = 122
+        versionName = "3.0.22-apple.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -125,7 +125,7 @@ android {
         create("dev") {
             dimension = "env"
             applicationId = "com.dev.bitchord"
-            resValue("string", "app_name", "Auris")
+            resValue("string", "app_name", "Apple Auris")
         }
         create("prod") {
             dimension = "env"
