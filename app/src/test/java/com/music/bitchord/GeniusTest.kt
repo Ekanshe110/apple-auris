@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Assume
 import org.junit.Test
 
 class GeniusTest {
@@ -109,6 +110,12 @@ class GeniusTest {
 
     @Test
     fun `live genius search and scraping test with noisy titles`() = kotlinx.coroutines.runBlocking {
+        // Live third-party service. Keep it out of the default unit-test gate;
+        // set RUN_LIVE_TESTS=1 to run it deliberately.
+        Assume.assumeTrue(
+            "live Genius test disabled; set RUN_LIVE_TESTS=1",
+            System.getenv("RUN_LIVE_TESTS") == "1",
+        )
         println("--- TEST 1: Queen - Bohemian Rhapsody (Official Video) ---")
         val lyrics1 = Genius.lyrics("Bohemian Rhapsody (Official Video)", "Queen")
         assertNotNull(lyrics1)
