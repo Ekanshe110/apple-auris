@@ -4,6 +4,16 @@ Apple Auris is a personal GPL-3.0 fork of [Auris](https://github.com/OreoMuncher
 
 The upstream app and its credits remain intact. This fork exists to make the Apple Music addon path faster and to carry the Dolby/Atmos playback work, with signed APKs built entirely by GitHub Actions.
 
+## Download
+
+Signed dev APK (sideload; package `com.dev.bitchord`):
+
+- [Apple Auris 3.0.22-apple.1 release](https://github.com/Ekanshe110/apple-auris/releases/tag/apple-auris-2)
+- [arm64-v8a APK](https://github.com/Ekanshe110/apple-auris/releases/download/apple-auris-2/app-dev-arm64-v8a-release.apk) — recommended for most phones
+- [universal APK](https://github.com/Ekanshe110/apple-auris/releases/download/apple-auris-2/app-dev-universal-release.apk)
+
+Verified: `1240` Android unit tests, `0` failures, `1` live-network test skipped; APK package/version/signature checked in CI.
+
 ## What is different here
 
 - **Stereo-only Atmos fast path** — when an addon search row explicitly declares a stereo mix, the player skips the wasted Atmos `/stream` rung and asks for lossless directly. Rows that declare Atmos, or say nothing, still ask for Atmos first.
