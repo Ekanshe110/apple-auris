@@ -1,0 +1,47 @@
+name: Fix locale key parity
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  fix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Restore fork fallbacks and add upstream keys
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          python3 - <<'PY'
+          import re
+          import subprocess
+          from pathlib import Path
+
+          locales = "de es fr he hi id it ja pl pt ru th tr vi zh".split()
+          fork = "8f0aa49349e670a9927506e85b8dd07bf402afb9"
+          base_path = "app/src/main/res/values/strings.xml"
+          base = Path(base_path).read_text()
+          pattern = re.compile(r'<(string|plurals|string-array)\s+name="([^"]+)"[^>]*?(?:/>|>.*?</\1>)', re.S)
+          base_items = {match.group(2): match.group(0) for match in pattern.finditer(base)}
+          translatable = {
+              match.group(2) for match in pattern.finditer(base)
+              if 'translatable="false"' not in match.group(0)
+          }
+          for locale in locales:
+              path = Path(f"app/src/main/res/values-{locale}/strings.xml")
+              original = subprocess.check_output(["git", "show", f"{fork}:{path}"], text=True)
+              present = {match.group(2) for match in pattern.finditer(original)}
+              missing = [name for name in translatable if name not in present]
+              additions = "\n".join("    " + base_items[name] for name in missing)
+              updated = original.replace("</resources>", additions + "\n</resources>")
+              path.write_text(updated)
+              print(f"{locale}: added {len(missing)} keys")
+          PY
+          git add app/src/main/res/values-*/strings.xml
+          git commit -m "fix(locale): restore complete key parity"
+          git push origin HEAD:feature/automix-core-v2
