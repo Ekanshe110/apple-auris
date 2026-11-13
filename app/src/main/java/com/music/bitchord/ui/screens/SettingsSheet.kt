@@ -60,6 +60,7 @@ import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Translate
+import androidx.compose.material.icons.rounded.Upgrade
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.LocalOffer
@@ -154,6 +155,7 @@ import com.music.bitchord.ui.components.SupportDonations
 import com.music.bitchord.ui.components.SearchField
 import com.music.bitchord.ui.components.thumbnailBorder
 import com.music.bitchord.ui.icons.BitChordIcons
+import com.music.bitchord.ui.onboarding.OnboardingState
 import com.music.bitchord.ui.performance.resolvePerformanceRefreshRate
 import com.music.bitchord.ui.performance.supportedPerformanceRefreshRates
 import com.music.bitchord.data.model.Account
@@ -231,11 +233,6 @@ fun SettingsScreen(
     val automixPerformance by AppSettings.automixPerformanceMode.collectAsStateWithLifecycle()
     val homeProvider by AppSettings.homeProvider.collectAsStateWithLifecycle()
     val skipSilence by AppSettings.skipSilence.collectAsStateWithLifecycle()
-    val dolbyAtmos by AppSettings.dolbyAtmos.collectAsStateWithLifecycle()
-    // A property of the hardware, so it is read once rather than remembered
-    // against a key that can never change — see [DeviceCodecs.playsDolbyAtmos],
-    // which caches the codec-list walk for the life of the process.
-    val dolbyAtmosSupported = DeviceCodecs.playsDolbyAtmos
     val spatialAudio by AppSettings.spatialAudio.collectAsStateWithLifecycle()
     val simulatedAtmos by AppSettings.simulatedAtmos.collectAsStateWithLifecycle()
     val liquidGlassHaptics by AppSettings.liquidGlassHaptics.collectAsStateWithLifecycle()
@@ -245,6 +242,7 @@ fun SettingsScreen(
     val reduceDynamicBlur by AppSettings.reduceDynamicBlur.collectAsStateWithLifecycle()
     val liquidGlass by AppSettings.liquidGlass.collectAsStateWithLifecycle()
     val liquidGlassIntensity by AppSettings.liquidGlassIntensity.collectAsStateWithLifecycle()
+    val glassPerformance by AppSettings.glassPerformance.collectAsStateWithLifecycle()
     val foldingNavBar by AppSettings.foldingNavBar.collectAsStateWithLifecycle()
     val podcastsEnabled by AppSettings.podcastsEnabled.collectAsStateWithLifecycle()
     val homeFlowVisible by AppSettings.homeFlowVisible.collectAsStateWithLifecycle()
@@ -731,6 +729,55 @@ fun SettingsScreen(
                             AppSettings.setSeamlessQualityUpgrade(false)
                         } else {
                             showSeamlessUpgradeConfirmation = true
+                        }
+                    },
+                )
+            }
+            // The songs kept on the device are upgraded to a better copy
+            // while they play, unless the app cannot fetch one.
+            //
+            // The switch shows the effective answer, so it goes off with the
+            // network and comes back with it — an upgrade is a fetch, and an
+            // offline app cannot make one whatever the switch says. The
+            // listener's own answer is kept meanwhile: coming back online
+            // restores the upgrade rather than forgetting the choice.
+            val autoUpgradeLocalTitle = stringResource(R.string.auto_upgrade_local_storage)
+            val autoUpgradeLocal by AppSettings.effectiveAutoUpgradeLocalStorage
+                .collectAsStateWithLifecycle()
+            row(
+                autoUpgradeLocalTitle,
+                "local storage",
+                "downloads",
+                "saved",
+                "upgrade",
+                "quality",
+                "lossless",
+            ) {
+                SettingsRow(
+                    icon = Icons.Rounded.Upgrade,
+                    title = autoUpgradeLocalTitle,
+                    subtitle = stringResource(
+                        if (detectedOffline) {
+                            R.string.auto_upgrade_local_storage_offline_subtitle
+                        } else {
+                            R.string.auto_upgrade_local_storage_subtitle
+                        },
+                    ),
+                    enabled = !detectedOffline,
+                    trailing = {
+                        Switch(
+                            checked = autoUpgradeLocal,
+                            onCheckedChange = AppSettings::setAutoUpgradeLocalStorage,
+                            enabled = !detectedOffline,
+                            colors = SwitchDefaults.colors(
+                                checkedTrackColor = MaterialTheme.colorScheme.primary,
+                                checkedBorderColor = MaterialTheme.colorScheme.primary,
+                            ),
+                        )
+                    },
+                    onClick = {
+                        if (!detectedOffline) {
+                            AppSettings.setAutoUpgradeLocalStorage(!autoUpgradeLocal)
                         }
                     },
                 )
@@ -1670,6 +1717,19 @@ fun SettingsScreen(
                         steps = 8,
                     )
                 }
+                // Frosted instead of refracting: the same glass with its lens
+                // pass skipped, for phones the shader is too much for. A
+                // sub-row rather than a row of its own because it qualifies
+                // the Liquid Glass switch above it.
+                val glassPerformanceTitle = stringResource(R.string.glass_performance)
+                row(glassPerformanceTitle, "glass", "performance", "refraction", "frosted", "lag") {
+                    SettingsSubRow(
+                        title = glassPerformanceTitle,
+                        checked = glassPerformance,
+                        onCheckedChange = AppSettings::setGlassPerformance,
+                        subtitle = stringResource(R.string.glass_performance_subtitle),
+                    )
+                }
             }
             if (liquidGlassSupported) {
                 val foldingNavTitle = stringResource(R.string.folding_nav_bar)
@@ -2011,6 +2071,26 @@ fun SettingsScreen(
         }
         if (openCategory == SettingsCategory.ADVANCED || (openCategory == null && searchActive)) {
         SearchableSettingsGroup(search, SettingsCategory.ADVANCED) {
+            // The way back into the first-run flow, for anybody who wants to
+            // see it again — a tester, or a listener showing somebody what the
+            // app does on the first launch. It forgets the flow has been seen
+            // and then asks the activity to raise it: settings cannot show a
+            // full-screen flow itself, and the activity is the thing that owns
+            // the composition it would sit on.
+            val replayContext = LocalContext.current
+            val replayOnboardingTitle = "Replay onboarding"
+            row(replayOnboardingTitle, "debug", "onboarding", "setup", "first run") {
+                SettingsRow(
+                    icon = Icons.Rounded.AutoAwesome,
+                    title = replayOnboardingTitle,
+                    subtitle = "Show the first-run flow again",
+                    onClick = {
+                        OnboardingState.reset(replayContext)
+                        OnboardingState.requestReplay()
+                    },
+                )
+            }
+            RowDivider()
             val showNerdStatsTitle = stringResource(R.string.show_nerd_stats)
             row(showNerdStatsTitle, "debug", "bitrate", "codec") {
                 SettingsRow(
@@ -2461,6 +2541,7 @@ private fun DownloadQuality.localizedLabel(): String = stringResource(
         DownloadQuality.STANDARD -> R.string.standard
         DownloadQuality.HIGH -> R.string.high
         DownloadQuality.LOSSLESS -> R.string.lossless
+        DownloadQuality.DOLBY -> R.string.dolby_atmos
     },
 )
 

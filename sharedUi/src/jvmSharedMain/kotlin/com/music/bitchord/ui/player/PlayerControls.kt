@@ -76,6 +76,7 @@ import org.jetbrains.compose.resources.stringResource
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Shadow
@@ -660,22 +661,25 @@ internal fun TransportRow(
     /** Rounds the transport polygons; see [DEFAULT_TRANSPORT_SMOOTHNESS]. */
     smoothness: Float = DEFAULT_TRANSPORT_SMOOTHNESS,
 ) {
-    // The pause glyph, measured against Apple's player: 0.60x the height it
-    // had when the measurements were taken — 38.3pt tall on Apple's own
-    // numbers. The touch box is untouched, so the button hits exactly as it
-    // ever did.
+    // The play glyph is back at the size it had before the transport was
+    // copied out at 74dp: 38dp, with the 92dp touch box it always had. The
+    // triangle is then 30.5 x 34.2dp — the reference player draws one 92px
+    // across on the same screen, so this is the same picture at the size the
+    // button is meant to be. A hit target is not a picture of one, and the
+    // reach stays where it was.
+    //
+    // Everything else about the row is untouched: the skips at 53dp, the
+    // SpaceAround spacing and the touch boxes.
     val ink = LocalPlayerAccent.current ?: LocalPlayerInk.current
     val playSize = if (compact) 30.dp else 38.dp
     val playTouch = if (compact) 76.dp else 92.dp
-    val skipSize = if (compact) 36.dp else PLAYER_SKIP_ICON_SIZE
+    val skipSize = if (compact) 44.dp else PLAYER_SKIP_ICON_SIZE
     Row(
-        // A tight, centred cluster — the shrink to 59/42dp left SpaceAround
-        // stretching the empty space between the buttons across the whole
-        // width, which read as the row falling apart rather than the icons
-        // getting smaller. spacedBy holds a fixed gap instead, and the
-        // alignment centres the cluster where the three sat before.
+        // SpaceAround, as BitChord spaces it: the outer margins take half a
+        // gap, so the three buttons spread a little further apart from each
+        // other than a fixed gap would.
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(TRANSPORT_GAP, Alignment.CenterHorizontally),
+        horizontalArrangement = Arrangement.SpaceAround,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         TransportGlyph(
@@ -1093,27 +1097,28 @@ private fun TransportGlyph(
     }
 }
 
-/** The skip glyphs' width, and their touch box, beside the larger play button. */
-private val PLAYER_SKIP_ICON_SIZE = 42.dp
-
 /**
- * The fixed gap between the three transport buttons' boxes, derived from the
- * measured centres — both sets of reference numbers put the skips at 23.4% and
- * 76.5% of the width, 104.5dp centre-to-centre from the pause button on a
- * 393dp player. With the boxes at 53dp and 92dp, that leaves
- * 104.5 − 26.5 − 46 = 32dp between them: a tight cluster that still reads as
- * three buttons, not one object.
+ * The skip glyphs' width and touch box, beside the larger play button, and
+ * the vertical squash that keeps the pair low and long.
  */
-private val TRANSPORT_GAP = 32.dp
+private val PLAYER_SKIP_ICON_SIZE = 53.dp
 private val PLAYER_SKIP_TOUCH_SIZE = 53.dp
-
-/**
- * The skip glyphs are drawn a little flatter than they are wide, so the pair
- * reads lower and longer next to the play button without losing any width.
- */
 private const val PLAYER_SKIP_HEIGHT_SCALE = 0.85f
 
 private val BOTTOM_ACTION_SIZE = 44.dp
+
+/** What the lyrics and queue glyphs are drawn at inside [BOTTOM_ACTION_SIZE]. */
+private val BOTTOM_ICON_SIZE = 26.dp
+
+/**
+ * The lit lyrics/queue tile, measured off Apple Music's as BitChord has it:
+ * the glyph fills about three quarters of it, its corners about a fifth, and
+ * it is white at a little over half strength so the artwork still colours it.
+ * The glyph is cut out of the tile rather than drawn over it.
+ */
+private val BOTTOM_ACTIVE_TILE_SIZE = 35.dp
+private val BOTTOM_ACTIVE_TILE_CORNER = 7.dp
+private const val BOTTOM_ACTIVE_TILE_ALPHA = 0.62f
 
 /**
  * Segment width for the Shuffle/Repeat/Autoplay capsule, which is always
@@ -1403,17 +1408,44 @@ private fun BottomGlyph(
 ) {
     val haptics = rememberHaptics()
     val ink = LocalPlayerAccent.current ?: LocalPlayerInk.current
+    // The main player's own opacity scale, so the bottom row is part of the
+    // same picture as the rest of the player rather than a second one with
+    // its own idea of how strong a glyph is. The reference player's bottom
+    // icons measure 0.67 of the ink, and the role that draws the lyrics, the
+    // queue and the AirPlay icon is 0.65 — the same strength, named once.
     val alphas = LocalPlayerAlphas.current
     // Read only from the click handler, never during composition, so writing it
     // costs no recomposition. Starts a full window in the past so the first tap
     // is never the one that gets swallowed.
     val lastTap = remember { mutableLongStateOf(-tapWindowMs) }
+    val tileColor = Color.White.copy(alpha = BOTTOM_ACTIVE_TILE_ALPHA)
     Box(
         modifier = Modifier
             .size(BOTTOM_ACTION_SIZE)
-            .clip(CircleShape)
-            .background(
-                if (highlighted) ink.copy(alpha = alphas.buttonFill) else Color.Transparent,
+            // Lit, BitChord's way: a rounded square tile with the glyph cut out
+            // of it, the artwork showing through. The glyph is drawn first and
+            // the tile over it with SrcOut, which keeps the tile only where the
+            // glyph is not. Offscreen only while lit, so an unlit glyph costs
+            // no extra layer.
+            .then(
+                if (highlighted) {
+                    Modifier
+                        .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+                        .drawWithContent {
+                            drawContent()
+                            val side = BOTTOM_ACTIVE_TILE_SIZE.toPx()
+                            val corner = BOTTOM_ACTIVE_TILE_CORNER.toPx()
+                            drawRoundRect(
+                                color = tileColor,
+                                topLeft = Offset((size.width - side) / 2f, (size.height - side) / 2f),
+                                size = Size(side, side),
+                                cornerRadius = CornerRadius(corner, corner),
+                                blendMode = BlendMode.SrcOut,
+                            )
+                        }
+                } else {
+                    Modifier
+                },
             )
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
@@ -1429,14 +1461,16 @@ private fun BottomGlyph(
             .semantics { this.contentDescription = contentDescription },
         contentAlignment = Alignment.Center,
     ) {
-        val tint = ink.copy(alpha = if (highlighted) alphas.primary else alphas.tertiary)
+        // Not while lit: the tile's cut-out needs the glyph drawn plainly in the
+        // layer above, which is blended as a whole.
+        val tint = if (highlighted) Color.White else ink.copy(alpha = alphas.tertiary)
         if (icon != null) {
             Icon(
                 painter = icon.painter(),
                 contentDescription = null,
                 tint = tint,
                 modifier = Modifier
-                    .size(26.dp),
+                    .size(BOTTOM_ICON_SIZE),
             )
         } else if (label != null) {
             Text(

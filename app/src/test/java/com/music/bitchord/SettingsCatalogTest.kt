@@ -118,7 +118,8 @@ class SettingsCatalogTest {
             "audio.source", "audio.offline_mode", "audio.wifi", "audio.mobile_data",
             "audio.output_precision", "audio.bit_perfect", "audio.prefer_usb_dac",
             "audio.loudness_normalization", "audio.loudness_off_on_speaker",
-            "audio.seamless_quality_upgrades", "audio.equalizer", "audio.jamesdsp",
+            "audio.seamless_quality_upgrades", "audio.auto_upgrade_local_storage",
+            "audio.equalizer", "audio.jamesdsp",
             "playback.prefer_music_only", "playback.crossfade", "playback.automix",
             "playback.automix_engine", "playback.automix_performance", "playback.skip_silence",
             "playback.spatial_audio", "playback.simulated_atmos", "playback.smart_version_alignment",
@@ -144,7 +145,7 @@ class SettingsCatalogTest {
             "storage.clear_image_cache", "storage.local_music_folder", "storage.use_all_audio_folders",
             "storage.filter_non_music_audio",
             "data.replay", "data.work_out_genres", "data.export", "data.import",
-            "language.app_language", "advanced.nerd_stats", "support.donate",
+            "language.app_language", "advanced.nerd_stats", "advanced.replay_onboarding", "support.donate",
         )
         val missing = required.filterNot { SettingsCatalog.contains(it) }
         assertEquals("these settings are not in the catalogue: $missing", emptyList<String>(), missing)

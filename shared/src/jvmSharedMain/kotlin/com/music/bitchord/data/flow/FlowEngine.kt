@@ -120,16 +120,32 @@ object FlowEngine {
     ): List<Song> {
         val historyRank = history.mapIndexed { i, s -> s.videoId to i }.toMap()
         val hints = mood.genreHints()
-        // Hard pool gates at the slider extremes, so full Adventurous means
-        // zero familiar tracks and full Personal means zero fresh ones —
-        // scoring alone could never promise that.
+        // The slider's extremes are promises about the *output*, and they used
+        // to be enforced on the pool — which emptied it. Full Adventurous
+        // dropped every favourite and every played track, and for a listener
+        // whose pool is exactly that (a Spotify seed pool is likes and
+        // history, nothing else) the answer was no mix at all: the switch that
+        // says "surprise me" is the one that produced a blank screen.
+        //
+        // So the pool is left alone here: familiar tracks are what a mix is
+        // *seeded* from, and the promise is kept where it belongs — in the
+        // finished queue, which drops them when discovery is at the top.
         val discovery = tuner.discovery.coerceIn(0f, 1f)
-        val gated = pool.distinctBy { it.videoId }.let { distinct ->
-            when {
-                discovery >= 0.85f -> distinct.filter { it.videoId !in favIds && it.videoId !in historyRank }
-                discovery <= 0.15f -> distinct.filter { it.videoId in favIds || it.videoId in historyRank }
-                else -> distinct
+        val distinct = pool.distinctBy { it.videoId }
+        val gated = when {
+            discovery <= 0.15f ->
+                distinct.filter { it.videoId in favIds || it.videoId in historyRank }
+            discovery >= 0.85f -> {
+                // Fresh only — while there is something fresh to play. A pool
+                // that is nothing but favourites (a Spotify seed pool is likes
+                // and history) must not be emptied by the promise: an empty mix
+                // is not a more adventurous one. What survives here is used to
+                // *seed*; the finished queue is where familiar tracks are
+                // removed, in [buildInitialQueue].
+                val fresh = distinct.filter { it.videoId !in favIds && it.videoId !in historyRank }
+                fresh.ifEmpty { distinct }
             }
+            else -> distinct
         }
         return gated
             .filterNot { isExcluded(it, emptySet(), emptyMap(), skipCounts, tuner, genreOf) }
@@ -153,6 +169,7 @@ object FlowEngine {
         config: FlowConfig = FlowConfig(),
         limit: Int = INITIAL_TRACKS,
         genreOf: (String) -> List<String> = { emptyList() },
+        relatedTracks: (suspend (Song) -> List<Song>)? = null,
     ): List<Song> {
         val favIds = seeds.favorites.map { it.videoId }.toSet()
         // A mood's own collections lead: the mix is about the mood, and the
@@ -171,19 +188,36 @@ object FlowEngine {
             limit = min(limit, 12),
         )
         if (ordered.isEmpty()) {
-            // Nothing local (fresh account edge): fall back to quick picks raw.
+            // Nothing survived the local pass. That is not the end of the mix:
+            // the seeds themselves are still the best thing to expand from,
+            // and expansion is where the next songs come from anyway. Only when
+            // there is nothing at all to seed — no quick picks, no favourites,
+            // no history — is the answer honestly empty.
             val fallback = seeds.quickPicks
                 .filterNot { isExcluded(it, bannedIds, likeStatuses, skipCounts, config.tuner, genreOf) }
                 .take(limit)
-            return tagFlow(fallback)
+            if (fallback.isEmpty() && seeds.favorites.isEmpty() && seeds.history.isEmpty()) {
+                return tagFlow(emptyList())
+            }
+            if (fallback.isNotEmpty()) return tagFlow(fallback)
         }
         // Expand via radio on rotating favorite/history seeds for breadth.
         val expanded = ordered.toMutableList()
         val radioSeeds = pickRadioSeeds(ordered, seeds.favorites, config.tuner, seeds.moodPool)
         for (seed in radioSeeds) {
             if (expanded.size >= limit) break
-            val related = runCatching { YtMusicRepository.radio(seed.videoId).getOrNull() }
-                .getOrNull().orEmpty()
+            // Whose algorithm expands the mix is the provider's business, not
+            // the engine's: the caller hands in the one it wants, and the
+            // engine only weighs and filters what comes back. When no
+            // expander is handed in, this is a YouTube Music mix and the
+            // expander is YouTube Music's radio.
+            val expandedTracks = if (relatedTracks != null) {
+                runCatching { relatedTracks(seed) }.getOrDefault(emptyList())
+            } else {
+                runCatching { YtMusicRepository.radio(seed.videoId).getOrNull() }
+                    .getOrNull().orEmpty()
+            }
+            val related = expandedTracks
                 .filterNot { isExcluded(it, bannedIds, likeStatuses, skipCounts, config.tuner, genreOf) }
                 // Full Adventurous keeps liked tracks out of the expansion too.
                 .filterNot { config.tuner.discovery >= 0.85f && it.videoId in favIds }
@@ -195,7 +229,16 @@ object FlowEngine {
             }
             expanded += ranked.filterNot { c -> expanded.any { QueueBuilder.isSameRecording(it, c) } }
         }
-        val final = expanded.distinctBy { it.videoId }.take(limit)
+        val distinct = expanded.distinctBy { it.videoId }
+        // Adventurous means the finished queue holds no familiar track — but it
+        // never means an empty queue: if nothing fresh came back, the familiar
+        // songs are still a mix, and a mix is what was asked for.
+        val freshOnly = if (config.tuner.discovery >= 0.85f) {
+            distinct.filterNot { it.videoId in favIds }
+        } else {
+            distinct
+        }
+        val final = (freshOnly.ifEmpty { distinct }).take(limit)
         if (final.isEmpty()) return tagFlow(ordered.take(limit))
         return tagFlow(final)
     }

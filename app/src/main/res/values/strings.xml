@@ -32,6 +32,7 @@
     <string name="downloaded_songs">Downloaded songs</string>
     <string name="local_music">Local Music</string>
     <string name="search_source_youtube" translatable="false">YouTube</string>
+    <string name="search_source_spotify" translatable="false">Spotify</string>
     <string name="audio_files_on_device">Audio files on device</string>
     <string name="on_device">On Device</string>
     <string name="playlists">Playlists</string>
@@ -387,6 +388,8 @@
     <string name="liquid_glass">Liquid Glass</string>
     <string name="liquid_glass_subtitle">Real refracting glass on the floating nav bar. Android 12+ only; uses more GPU.</string>
     <string name="liquid_glass_unavailable">Requires Android 12 or newer</string>
+    <string name="glass_performance">Better Performance for Glass</string>
+    <string name="glass_performance_subtitle">Frosts the glass instead of refracting it; the blur, tint and rim stay, the lens shader is skipped. Turn off to switch back to Liquid Glass.</string>
     <string name="liquid_glass_intensity">Liquid Glass intensity</string>
     <string name="liquid_glass_intensity_subtitle">Scales the blur and refraction; lower is cheaper to render, which fixes glass stutter on low-end devices</string>
     <string name="folding_nav_bar">Folding nav bar</string>
@@ -1247,11 +1250,12 @@
     <string name="flow_favorites">Favorites</string>
     <string name="flow_favorites_subtitle">Weight of liked tracks in the mix</string>
     <string name="flow_genres">Genres in my Flow</string>
+    <string name="flow_genres_more">Show %1$d more</string>
+    <string name="flow_genres_fewer">Show fewer</string>
     <string name="flow_banned">Banned from Flow</string>
     <string name="flow_empty_banned">Nothing banned — hold a track to ban it from Flow</string>
     <string name="flow_apply">Apply &amp; rebuild</string>
     <string name="flow_save_title">Save Flow</string>
-    <string name="flow_draft_hint">Edits stay local until you apply them</string>
     <string name="flow_mix_title">In this mix · %1$d</string>
     <string name="flow_temp_count">%1$d tracks · %2$s mood · temporary</string>
     <string name="flow_temp_meta">%1$d tracks · temporary</string>
@@ -1430,4 +1434,12 @@
     <string name="liquid_glass_haptics_subtitle">Haptic buzz on glass nav, toggles, sliders and menus</string>
     <string name="hide_status_bar_in_player">Hide status bar in player</string>
     <string name="hide_status_bar_in_player_subtitle">Hides the clock, battery and notification icons while the main player is open</string>
+    <string name="upgrade_quality_started">Looking for a better copy…</string>
+    <string name="upgrade_quality_offline">Offline mode is on — upgrades need the network</string>
+    <string name="upgrade_quality_cooldown">Just tried — give it a moment</string>
+    <string name="upgrade_quality_found">Upgraded to %1$s</string>
+    <string name="upgrade_quality_none_found">No better copy found</string>
+    <string name="auto_upgrade_local_storage">Auto upgrade songs in local storage</string>
+    <string name="auto_upgrade_local_storage_subtitle">Look for a better copy of the songs saved on this device</string>
+    <string name="auto_upgrade_local_storage_offline_subtitle">Offline mode is on — upgrades are paused</string>
 </resources>

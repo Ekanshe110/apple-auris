@@ -20,6 +20,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.compose.animation.AnimatedContent
@@ -140,6 +142,8 @@ import com.music.bitchord.auth.YtMusicLoginScreen
 import com.music.bitchord.data.AppAnnouncements
 import com.music.bitchord.data.AppUpdateChecker
 import com.music.bitchord.data.LocalMediaRepository
+import com.music.bitchord.data.sources.mornye.InstalledSflx
+import com.music.bitchord.data.sources.mornye.SflxCatalog
 import com.music.bitchord.data.listentogether.JamInviteLink
 import com.music.bitchord.data.listentogether.ListenTogether
 import com.music.bitchord.data.listentogether.partyQueueIndexOf
@@ -153,18 +157,25 @@ import com.music.bitchord.data.model.PlaybackSourceType
 import com.music.bitchord.data.model.SearchFilter
 import com.music.bitchord.data.model.SearchResult
 import com.music.bitchord.data.model.ShelfItem
+import com.music.bitchord.data.model.DetailPage
 import com.music.bitchord.data.model.Song
+import com.music.bitchord.data.model.asSpotifyQueueRows
 import com.music.bitchord.data.model.isUnresolvedSpotify
 import com.music.bitchord.data.model.UiState
 import com.music.bitchord.data.model.UserPlaylist
 import com.music.bitchord.data.model.EntityType
 import com.music.bitchord.data.model.SearchHistoryEntity
+import com.music.bitchord.ui.onboarding.OnboardingState
+import com.music.bitchord.ui.onboarding.SetupWizard
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import com.music.bitchord.data.model.durationMillis
 import com.music.bitchord.data.scrobbling.LastFM
 import com.music.bitchord.data.settings.AppSettings
+import com.music.bitchord.data.settings.HomeProvider
 import com.music.bitchord.ui.components.ArtworkFlightLayer
+import com.music.bitchord.ui.components.SflxInstallDialog
+import com.music.bitchord.ui.components.SflxSettingsDialog
 import com.music.bitchord.ui.components.SingSheet
 import com.music.bitchord.ui.components.cancelArtworkFlight
 import com.music.bitchord.data.settings.LibrarySort
@@ -221,6 +232,7 @@ import com.music.bitchord.playback.toSong
 import com.music.bitchord.playback.toDirectYouTubeMediaItem
 import com.music.bitchord.playback.toggleAutoplay
 import com.music.bitchord.playback.toggleShuffle
+import com.music.bitchord.playback.UpgradeOutcome
 import com.music.bitchord.playback.upgradeQuality
 import com.music.bitchord.playback.revertToOriginal
 import com.music.bitchord.playback.swapToVersion
@@ -271,6 +283,7 @@ import com.music.bitchord.ui.components.LocalAppBackdrop
 import com.music.bitchord.ui.components.LocalAppBackdropFrozen
 import com.music.bitchord.ui.components.LocalLiquidGlassEnabled
 import com.music.bitchord.ui.components.GlassEffectConfig
+import com.music.bitchord.ui.components.GlassStyle
 import com.music.bitchord.ui.components.LocalGlassEffectConfig
 import com.music.bitchord.ui.components.backdrop.backdrops.LayerBackdrop
 import com.music.bitchord.ui.components.backdrop.backdrops.layerBackdrop
@@ -380,6 +393,13 @@ private const val TOP_FADE_RAMP = 0.3f
 private const val INITIAL_RADIO_TRACKS = 24
 
 /**
+ * Blur radius for the frosted glass mode — BitChord's own value. Deeper than
+ * the liquid material's 3dp because frosted glass has no lens to carry the
+ * refraction, and the heavier blur is what gives it its soft, matte look.
+ */
+private const val FROST_GLASS_BLUR_DP = 16f
+
+/**
  * The activity a context belongs to, however many times it is wrapped.
  *
  * A composable's context is usually the activity itself, but it can be a
@@ -414,8 +434,28 @@ class MainActivity : AppCompatActivity() {
             val highPerformance by AppSettings.highPerformanceMode.collectAsStateWithLifecycle()
             val liquidGlassEnabled by AppSettings.liquidGlass.collectAsStateWithLifecycle()
             val liquidGlassIntensity by AppSettings.liquidGlassIntensity.collectAsStateWithLifecycle()
+            val glassPerformance by AppSettings.glassPerformance.collectAsStateWithLifecycle()
             val iosOverscrollFactory = rememberIosOverscrollFactory()
             val performanceRefreshRate by AppSettings.performanceRefreshRate.collectAsStateWithLifecycle()
+            // The first-run flow, and how far in its sheet has come — the app
+            // behind shrinks off the same number. Asked of the store rather
+            // than remembered, so the developer row's "show me that again"
+            // works without a restart.
+            var showOnboarding by remember { mutableStateOf(OnboardingState.shouldShow(this@MainActivity)) }
+            var onboardingReveal by remember { mutableFloatStateOf(0f) }
+            val replayOnboarding by OnboardingState.replay.collectAsStateWithLifecycle()
+            LaunchedEffect(replayOnboarding) {
+                if (replayOnboarding) {
+                    onboardingReveal = 0f
+                    showOnboarding = true
+                    OnboardingState.replayHandled()
+                }
+            }
+            // Leaving the flow leaves the app the size it was, however it was
+            // left: a finished flow, a skipped one, or a back press.
+            LaunchedEffect(showOnboarding) {
+                if (!showOnboarding) onboardingReveal = 0f
+            }
             val composeView = LocalView.current
             LaunchedEffect(highPerformance, performanceRefreshRate, composeView) {
                 applyPerformanceMode(highPerformance, performanceRefreshRate, composeView)
@@ -458,8 +498,18 @@ class MainActivity : AppCompatActivity() {
                     // config, and each step down is the same material cheaper
                     // to render — the low-end lever against the sheet-swipe
                     // glass jank. Dispersion stays off at any intensity.
+                    // Frosted mode (BitChord's "Better Performance for Glass")
+                    // swaps the material rather than scaling it: the same tint,
+                    // rim, shadow and motion, but a deeper blur and no lens
+                    // pass. The liquid blur itself is untouched, so switching
+                    // the option back restores exactly what was there before.
                     LocalGlassEffectConfig provides GlassEffectConfig(
-                        blurRadius = 3f * liquidGlassIntensity,
+                        style = if (glassPerformance) GlassStyle.FROSTED else GlassStyle.LIQUID,
+                        blurRadius = if (glassPerformance) {
+                            FROST_GLASS_BLUR_DP
+                        } else {
+                            3f * liquidGlassIntensity
+                        },
                         lensHeight = 0.60f * liquidGlassIntensity,
                         lensAmount = 0.69f * liquidGlassIntensity,
                         chromaticAberration = false,
@@ -486,12 +536,46 @@ class MainActivity : AppCompatActivity() {
                 // A measured constraint cannot be stale — it is the very width
                 // the split is about to be laid out in.
                 BoxWithConstraints(Modifier.fillMaxSize()) {
-                    BitChordApp(
-                        darkTheme = darkTheme,
-                        windowWidth = maxWidth,
-                        windowHeight = maxHeight,
-                        appBackdrop = appBackdrop,
-                    )
+                    // Read here, where the constraint scope is the receiver: the
+                    // shapes below are drawn inside BoxScope, which cannot see
+                    // them.
+                    val windowWidth = maxWidth
+                    val windowHeight = maxHeight
+                    // The first-run flow, over the app rather than instead of
+                    // it: the library is already loading behind the sheet, so
+                    // the listener who finishes it lands on a home that is
+                    // ready rather than on a spinner they have just earned.
+                    //
+                    // The app behind is scaled and rounded as the sheet rises —
+                    // the same gesture the player makes over the library — and
+                    // the two read the one progress value, so they cannot move
+                    // apart.
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                val p = onboardingReveal
+                                val scale = 1f - 0.06f * p
+                                scaleX = scale
+                                scaleY = scale
+                                translationY = -size.height * 0.02f * p
+                                clip = true
+                                shape = RoundedCornerShape((30f * p).dp)
+                            },
+                    ) {
+                        BitChordApp(
+                            darkTheme = darkTheme,
+                            windowWidth = windowWidth,
+                            windowHeight = windowHeight,
+                            appBackdrop = appBackdrop,
+                        )
+                    }
+                    if (showOnboarding) {
+                        SetupWizard(
+                            onFinished = { showOnboarding = false },
+                            onReveal = { onboardingReveal = it },
+                        )
+                    }
                 }
                 }
             }
@@ -730,6 +814,16 @@ private fun BitChordApp(
     // background at all. Hosting it here also puts the scrim over the tab bar
     // and the mini player, like every other alert in the app.
     var editingSource by remember { mutableStateOf<SourceConfig?>(null) }
+    /**
+     * The install-from-link sheet, and the extension whose own settings are open.
+     *
+     * Held here rather than inside the sources screen for the same reason every
+     * other alert is: the screen sits inside the subtree that carries
+     * `hazeSource`, so a frosted card drawn from within it comes out with no
+     * background. See [SourcesScreen]'s note on `onEditSource`.
+     */
+    var installingExtension by remember { mutableStateOf(false) }
+    var editingExtension by remember { mutableStateOf<InstalledSflx?>(null) }
     var confirmJioSaavn by remember { mutableStateOf(false) }
     var editingPartyServer by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
@@ -885,6 +979,13 @@ private fun BitChordApp(
     val homeState by viewModel.home.collectAsStateWithLifecycle()
     val homeLoadingMore by viewModel.homeLoadingMore.collectAsStateWithLifecycle()
     val homeRecentlyPlayedLoading by viewModel.homeRecentlyPlayedLoading.collectAsStateWithLifecycle()
+    // What the home page says above its shelves: a greeting, a row of chips
+    // and the quick-access grid. Spotify's home has all three; YouTube's has
+    // none of them.
+    val homeHeader by viewModel.homeHeader.collectAsStateWithLifecycle()
+    // Which provider is drawing the page. Spotify's shelves are cards of
+    // collections, and the full-bleed hero treatment is for a row of tracks.
+    val homeProvider by AppSettings.homeProvider.collectAsStateWithLifecycle()
     // Flow: unlock gate + temp playlist + tuner.
     var showFlow by remember { mutableStateOf(false) }
     // The whole Quick Picks set, opened from the arrow at the end of its
@@ -1730,6 +1831,57 @@ private fun BitChordApp(
             // Start playback in the mini-player; the user opens the full view by tapping it.
         }
     }
+    /**
+     * Plays a page's songs.
+     *
+     * ## Why this does not wait
+     *
+     * A Spotify page lists its tracks before it knows which of them this app
+     * can play, and the matcher — YouTube Music, then every enabled source,
+     * for every row — takes its time. Play used to wait for that to finish,
+     * because a row that had found no counterpart could not be queued and the
+     * queue stopped after the eight songs that had matched by then.
+     *
+     * It does not have to be that way. A Spotify row carries the id of the
+     * recording it is, and the player resolves that id by asking the sources
+     * for the recording *by name* when the row is reached — the path a
+     * Spotify search result has always taken. So an unmatched row is queued
+     * as `spotify:<id>` and resolved when it plays, and the listener hears
+     * the song immediately instead of waiting half a minute for a lookup
+     * nobody asked for.
+     *
+     * The matching still runs, and the page still upgrades in place as the
+     * answers arrive; this only stops the *queue* from being held hostage to
+     * it.
+     *
+     * [index] is the row that was tapped, and it is the row that leads the
+     * queue.
+     */
+    val playBrowsePage: (DetailPage, List<Song>, Int?) -> Unit = browse@{ page, songs, index ->
+        val source = QueueSource(page.title, PlaybackSourceType.BROWSE, page.browseId)
+        val ready = songs.asSpotifyQueueRows()
+        if (ready.isEmpty()) return@browse
+        val at = index?.coerceIn(0, (ready.size - 1).coerceAtLeast(0)) ?: 0
+        playFrom(ready, at, source)
+    }
+
+    /**
+     * Shuffles a page's songs.
+     *
+     * The same rule as [playBrowsePage]: an unmatched Spotify row is queued
+     * as its own catalogue entry and resolved when it plays, so a shuffle is
+     * not held up by the matcher either.
+     */
+    val playBrowsePageShuffled: (DetailPage, List<Song>) -> Unit = browse@{ page, songs ->
+        val source = QueueSource(page.title, PlaybackSourceType.BROWSE, page.browseId)
+        val ready = songs.asSpotifyQueueRows()
+        if (ready.isEmpty()) return@browse
+        // Shuffle goes on first so the queue is built shuffled as it is
+        // set — the random pick here only decides which track leads it.
+        QueueShuffle.enableForNextQueue()
+        playFrom(ready, ready.indices.random(), source)
+    }
+
     // Kept for entry points whose rows already carry their origin (notably a
     // collection action fetched before this callback). The explicit wrappers
     // below are preferred because a track's album is not necessarily where it
@@ -1935,6 +2087,10 @@ private fun BitChordApp(
                     existing = listOf(seed),
                     seedSong = seed,
                     limit = INITIAL_RADIO_TRACKS,
+                    // An explicit station, not a queue top-up: this is the
+                    // listener asking for a radio, so the provider's own
+                    // algorithm answers it rather than the seed pool.
+                    station = true,
                 ).getOrElse {
                     if (request == playRequestGeneration) {
                         Toast.makeText(context, R.string.couldnt_load_tracks, Toast.LENGTH_SHORT).show()
@@ -2593,8 +2749,14 @@ private fun BitChordApp(
         },
         searchSource = searchSource,
         onToggleSource = {
+            // Three sources, so the button cycles: YouTube, Spotify, the
+            // device's own folder, and round again.
             onSearchSourceChange(
-                if (searchSource == SearchSource.LIBRARY) SearchSource.YOUTUBE else SearchSource.LIBRARY,
+                when (searchSource) {
+                    SearchSource.YOUTUBE -> SearchSource.SPOTIFY
+                    SearchSource.SPOTIFY -> SearchSource.LIBRARY
+                    SearchSource.LIBRARY -> SearchSource.YOUTUBE
+                },
             )
         },
         onTapSearchIcon = {
@@ -3658,8 +3820,21 @@ private fun BitChordApp(
                         )
                 ) {
                     {
-                        controller.upgradeQuality()
                         songActions = null
+                        val c = controller
+                        scope.launch {
+                            // The answer is said out loud. A button that
+                            // finds nothing and says nothing is the same as a
+                            // button that is broken, and it was read as one.
+                            val outcome = runCatching { c?.upgradeQuality() }
+                                .getOrNull() ?: UpgradeOutcome.STARTED
+                            val message = when (outcome) {
+                                UpgradeOutcome.STARTED -> context.getString(R.string.upgrade_quality_started)
+                                UpgradeOutcome.OFFLINE -> context.getString(R.string.upgrade_quality_offline)
+                                UpgradeOutcome.COOLDOWN -> context.getString(R.string.upgrade_quality_cooldown)
+                            }
+                            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                        }
                     }
                 } else {
                     null
@@ -4221,6 +4396,35 @@ private fun BitChordApp(
                             onEditWebDav = { showWebDavEditor = true },
                             onEditSmb = { showSmbEditor = true },
                             onConfirmJioSaavn = { confirmJioSaavn = true },
+                            onInstallExtension = { installingExtension = true },
+                            onEditExtension = { id ->
+                                editingExtension = SflxCatalog.installed.value.firstOrNull { it.id == id }
+                            },
+                            // A tap is the extension's door, and which door
+                            // depends on the extension: one that signs its
+                            // requests gets its verification page, and one
+                            // that does not has nothing to verify — so a tap
+                            // opens its settings, which is the only thing it
+                            // has to show. Hold always opens the settings.
+                            onVerifyExtension = { id ->
+                                val installed = SflxCatalog.installed.value.firstOrNull { it.id == id }
+                                if (installed != null && SflxCatalog.host?.sessionStatus(id) != null) {
+                                    scope.launch {
+                                        val url = withContext(Dispatchers.IO) {
+                                            SflxCatalog.beginVerification(id)
+                                        }
+                                        if (url == null && editingExtension == null) {
+                                            // Nothing to open: the gateway
+                                            // already knows this install, or it
+                                            // refused. The settings sheet says
+                                            // which, and holds Verify.
+                                            editingExtension = installed
+                                        }
+                                    }
+                                } else {
+                                    editingExtension = installed
+                                }
+                            },
                         )
                     } else if (key == "listen_together") {
                         ListenTogetherScreen(
@@ -4523,24 +4727,12 @@ private fun BitChordApp(
                             // time as the listener reaches the end of the list.
                             onLoadMore = { viewModel.loadMoreDetail(page.browseId) },
                             onSongClick = { songs, index ->
-                                playFrom(
-                                    songs,
-                                    index,
-                                    QueueSource(page.title, PlaybackSourceType.BROWSE, page.browseId),
-                                )
+                                playBrowsePage(page, songs, index)
                             },
                             onSongLongPress = { openSongMenu(withAlbum(it)) },
                             onSongSwipe = onSongSwipe,
                             onShuffle = { songs ->
-                                // Shuffle goes on first so the queue is built shuffled
-                                // as it is set — the random pick here only decides
-                                // which track leads it.
-                                QueueShuffle.enableForNextQueue()
-                                playFrom(
-                                    songs,
-                                    songs.indices.random(),
-                                    QueueSource(page.title, PlaybackSourceType.BROWSE, page.browseId),
-                                )
+                                playBrowsePageShuffled(page, songs)
                             },
                             onSectionItemClick = { item ->
                                 item.browseId?.let { id ->
@@ -4618,6 +4810,14 @@ private fun BitChordApp(
                             currentSong = player.song,
                             isPlaying = player.isPlaying,
                             title = stringResource(R.string.home),
+                            header = homeHeader,
+                            onChipSelected = viewModel::selectHomeChip,
+                            // Spotify's shelves are cards of collections —
+                            // albums, playlists, artists — and the full-bleed
+                            // hero treatment is for a row of tracks. A hero
+                            // card is a cover with a title laid over it, which
+                            // is not what a Spotify card is.
+                            leadHero = homeProvider != HomeProvider.SPOTIFY,
                             signedIn = signedIn,
                             onSignIn = { webSession = WebSessionMode.SIGN_IN },
                             signInBannerDismissed = signInBannerDismissed,
@@ -4816,10 +5016,17 @@ private fun BitChordApp(
                             onFilterChange = viewModel::onFilterChange,
                             // The podcasts filter goes with podcasts: a pill
                             // that only ever answers "nothing" is noise.
-                            availableFilters = if (podcastsEnabled) {
-                                com.music.bitchord.data.model.SearchFilter.entries
-                            } else {
-                                com.music.bitchord.data.model.SearchFilter.entries
+                            availableFilters = when {
+                                // Spotify's catalogue has no videos and no
+                                // shows, so a pill for either would be a pill
+                                // that answers from somewhere else.
+                                searchSource == SearchSource.SPOTIFY ->
+                                    com.music.bitchord.data.model.SearchFilter.entries.filter {
+                                        it != com.music.bitchord.data.model.SearchFilter.VIDEOS &&
+                                            it != com.music.bitchord.data.model.SearchFilter.PODCASTS
+                                    }
+                                podcastsEnabled -> com.music.bitchord.data.model.SearchFilter.entries
+                                else -> com.music.bitchord.data.model.SearchFilter.entries
                                     .filter { it != com.music.bitchord.data.model.SearchFilter.PODCASTS }
                             },
                             results = results,
@@ -4958,6 +5165,7 @@ private fun BitChordApp(
                                 SegmentedControl(
                                     options = listOf(
                                         stringResource(R.string.search_source_youtube),
+                                        stringResource(R.string.search_source_spotify),
                                         stringResource(R.string.library),
                                     ),
                                     selectedIndex = searchSource.ordinal,
@@ -6513,6 +6721,12 @@ private fun BitChordApp(
             LyricsSourcesDialog(
                 hazeState = hazeState,
                 onDismiss = { showLyricsSources = false },
+                // The extension that answers lyrics has its own settings, and
+                // one of them is what makes it answer at all. The dialog's
+                // door opens the same sheet the sources screen opens.
+                onOpenExtensionSettings = { id ->
+                    editingExtension = SflxCatalog.installed.value.firstOrNull { it.id == id }
+                },
             )
         }
 
@@ -6821,6 +7035,26 @@ private fun BitChordApp(
             PartyServerEditor(
                 hazeState = hazeState,
                 onDismiss = { editingPartyServer = false },
+            )
+        }
+
+        if (installingExtension) {
+            SflxInstallDialog(
+                onDismiss = {
+                    installingExtension = false
+                    SflxCatalog.clearInstallState()
+                },
+                onInstalled = {
+                    installingExtension = false
+                    SflxCatalog.clearInstallState()
+                },
+            )
+        }
+
+        editingExtension?.let { installed ->
+            SflxSettingsDialog(
+                installed = installed,
+                onDismiss = { editingExtension = null },
             )
         }
 

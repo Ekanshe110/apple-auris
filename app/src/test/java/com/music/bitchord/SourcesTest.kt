@@ -7,6 +7,7 @@ import com.music.bitchord.data.jiosaavn.selectBestSaavnStream
 import com.music.bitchord.data.model.Song
 import com.music.bitchord.data.settings.AppSettings
 import com.music.bitchord.data.settings.AudioQuality
+import com.music.bitchord.data.settings.DownloadQuality
 import com.music.bitchord.data.settings.permits
 import com.music.bitchord.data.sources.DeviceCodecs
 import com.music.bitchord.data.sources.ModuleSource
@@ -25,6 +26,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -641,6 +643,60 @@ class SourcesTest {
     }
 
     /**
+     * An extension switched off by the listener stays off across launches.
+     *
+     * An extension's row is a `MODULE` row — the same protocol, the same
+     * source implementation — and the retired built-in module used to take
+     * every `MODULE` row with it at launch. The row was then rebuilt from the
+     * installed package, and a rebuilt row arrives *on*: every extension
+     * turned itself back on after every restart.
+     */
+    @Test
+    fun `an extension switched off by the user stays off across launches`() {
+        val extension = SourceConfig(
+            id = "sflx:apple-music",
+            kind = SourceKind.MODULE,
+            label = "Apple Music",
+            baseUrl = "sflx://apple-music",
+            enabled = false,
+        )
+
+        val nextLaunch = SourceRegistry.sourcesForInit(
+            listOf(extension),
+            forceJioSaavnOff = true,
+        )
+
+        val kept = nextLaunch.singleOrNull { it.id == extension.id }
+        assertNotNull("the extension's row was dropped at launch", kept)
+        assertFalse("the extension turned itself back on", kept!!.enabled)
+        assertEquals("Apple Music", kept.label)
+    }
+
+    /**
+     * The retired built-in module index is still retired.
+     *
+     * The exception above is for extensions, which point at `sflx://`. A row
+     * pointing at an ordinary URL is the built-in index this build no longer
+     * carries, and it goes.
+     */
+    @Test
+    fun `the retired built-in module index is still dropped`() {
+        val retired = SourceConfig(
+            id = "module-built-in",
+            kind = SourceKind.MODULE,
+            baseUrl = "https://example.test/modules.json",
+            enabled = true,
+        )
+
+        val nextLaunch = SourceRegistry.sourcesForInit(
+            listOf(retired),
+            forceJioSaavnOff = true,
+        )
+
+        assertNull(nextLaunch.firstOrNull { it.id == retired.id })
+    }
+
+    /**
      * The playback and download paths ask one question — may YouTube serve
      * this? — because YouTube is reached directly rather than through the
      * source list. An addon left on must not answer it.
@@ -852,9 +908,10 @@ class SourcesTest {
 
     /**
      * The Dolby Atmos rung is additive, not a cap: it budgets like Lossless,
-     * every source may still answer, and the request is the same lossless one
-     * with an immersive answer preferred ahead of it. A track with no spatial
-     * master therefore plays its FLAC rather than failing the rung.
+     * every source may still answer, and the request it makes is the immersive
+     * one — the lossless walk with a spatial answer preferred ahead of it. A
+     * track with no spatial master therefore plays its FLAC rather than
+     * failing the rung.
      */
     @Test
     fun `the Dolby Atmos rung budgets like lossless and asks every source`() {
@@ -864,9 +921,38 @@ class SourcesTest {
         AppSettings.meteredConnection.value = null
         AppSettings.audioQualityWifi.value = AudioQuality.DOLBY
         try {
-            assertEquals(StreamRequest.Lossless, SourceResolver.requestForNow())
+            val request = SourceResolver.requestForNow()
+            assertEquals(StreamRequest.Atmos, request)
+            assertTrue(request.wantsLossless)
+            assertTrue(request.wantsAtmos)
             assertTrue(AppSettings.wantsDolbyAtmos)
             SourceKind.entries.forEach { kind -> assertTrue(AudioQuality.DOLBY.permits(kind)) }
+        } finally {
+            AppSettings.audioQualityWifi.value = wifi
+            AppSettings.audioQualityCellular.value = cellular
+            AppSettings.meteredConnection.value = metered
+        }
+    }
+
+    /**
+     * The two questions stay apart: the stream being played and the file being
+     * kept are asked separately, and neither decides the other.
+     *
+     * This is the bug the request-scoped signal exists to kill. The signal used
+     * to be one setting read by everything, so a Lossless *download* was
+     * served an Atmos file on any connection whose streaming rung was Dolby —
+     * the file was not the one the rung named.
+     */
+    @Test
+    fun `the streaming rung and the download rung are asked separately`() {
+        val wifi = AppSettings.audioQualityWifi.value
+        val cellular = AppSettings.audioQualityCellular.value
+        val metered = AppSettings.meteredConnection.value
+        AppSettings.meteredConnection.value = null
+        AppSettings.audioQualityWifi.value = AudioQuality.DOLBY
+        try {
+            assertFalse(SourceResolver.requestForDownload(DownloadQuality.LOSSLESS).wantsAtmos)
+            assertTrue(SourceResolver.requestForDownload(DownloadQuality.DOLBY).wantsAtmos)
         } finally {
             AppSettings.audioQualityWifi.value = wifi
             AppSettings.audioQualityCellular.value = cellular
@@ -881,17 +967,15 @@ class SourcesTest {
      * the switch is what decides.
      */
     @Test
-    fun `the Dolby Atmos rung is honoured with the master switch off`() {
+    fun `the Dolby Atmos rung is what asks for Atmos`() {
         val wifi = AppSettings.audioQualityWifi.value
         val cellular = AppSettings.audioQualityCellular.value
         val metered = AppSettings.meteredConnection.value
         AppSettings.meteredConnection.value = null
         AppSettings.audioQualityWifi.value = AudioQuality.DOLBY
-        AppSettings.dolbyAtmos.value = false
         try {
             assertTrue(AppSettings.wantsDolbyAtmos)
         } finally {
-            AppSettings.dolbyAtmos.value = true
             AppSettings.audioQualityWifi.value = wifi
             AppSettings.audioQualityCellular.value = cellular
             AppSettings.meteredConnection.value = metered
@@ -912,7 +996,10 @@ class SourcesTest {
     @Test
     fun `prefers the immersive row over a lossless one when Atmos is wanted`() {
         DeviceCodecs.forced = true
-        AppSettings.dolbyAtmos.value = true
+        val wifi = AppSettings.audioQualityWifi.value
+        // The rung *is* the request now: there is no separate switch, which is
+        // what stops Lossless serving a spatial mix.
+        AppSettings.audioQualityWifi.value = AudioQuality.DOLBY
         try {
             val target = TrackMatcher.Target("Gehra Hua", "Shashwat Sachdev", durationSec = 362)
             val stereo = song("Gehra Hua", "Shashwat Sachdev", duration = "6:02")
@@ -926,14 +1013,19 @@ class SourcesTest {
             )
         } finally {
             DeviceCodecs.forced = null
+            // Restored, not left at Dolby: the rung is read by everything that
+            // asks for a stream, so a test that changes it changes what the
+            // next test in this class is testing.
+            AppSettings.audioQualityWifi.value = wifi
         }
     }
 
-    /** Switched off, the immersive row is just a row and lossless decides again. */
+    /** A rung that does not ask for Atmos is just a row, and lossless decides again. */
     @Test
-    fun `ignores the immersive row when the Atmos setting is off`() {
+    fun `ignores the immersive row when the rung does not ask for Atmos`() {
         DeviceCodecs.forced = true
-        AppSettings.dolbyAtmos.value = false
+        val wifi = AppSettings.audioQualityWifi.value
+        AppSettings.audioQualityWifi.value = AudioQuality.LOSSLESS
         try {
             val target = TrackMatcher.Target("Gehra Hua", "Shashwat Sachdev", durationSec = 362)
             val stereo = song("Gehra Hua", "Shashwat Sachdev", duration = "6:02")
@@ -947,7 +1039,7 @@ class SourcesTest {
             )
         } finally {
             DeviceCodecs.forced = null
-            AppSettings.dolbyAtmos.value = true
+            AppSettings.audioQualityWifi.value = wifi
         }
     }
 
@@ -959,12 +1051,21 @@ class SourcesTest {
      */
     @Test
     fun `always swaps to lossless`() {
-        val youtube = StreamFormat(codec = "opus", kbps = 160)
-        assertTrue(SourceResolver.worthSwapping(StreamFormat(codec = "flac"), youtube))
-        // Even against a lossy stream that is nominally the higher bitrate.
-        assertTrue(
-            SourceResolver.worthSwapping(StreamFormat(codec = "flac"), StreamFormat(codec = "aac", kbps = 320)),
-        )
+        val wifi = AppSettings.audioQualityWifi.value
+        // Pinned, because what is "worth swapping to" depends on what was asked
+        // for: on a Dolby rung a FLAC is a downgrade, which is the opposite
+        // question to the one this test asks.
+        AppSettings.audioQualityWifi.value = AudioQuality.LOSSLESS
+        try {
+            val youtube = StreamFormat(codec = "opus", kbps = 160)
+            assertTrue(SourceResolver.worthSwapping(StreamFormat(codec = "flac"), youtube))
+            // Even against a lossy stream that is nominally the higher bitrate.
+            assertTrue(
+                SourceResolver.worthSwapping(StreamFormat(codec = "flac"), StreamFormat(codec = "aac", kbps = 320)),
+            )
+        } finally {
+            AppSettings.audioQualityWifi.value = wifi
+        }
     }
 
     /**
@@ -1416,6 +1517,9 @@ class SourcesTest {
      */
     @Test
     fun `patient upgrade chooses the better later answer`() = runBlocking {
+        val wifi = AppSettings.audioQualityWifi.value
+        AppSettings.audioQualityWifi.value = AudioQuality.LOSSLESS
+        try {
         val playing = StreamFormat(codec = "opus", kbps = 141)
         val slowLossless = FakeSource("Ricky's Addon", answerAfterMs = 200, format = StreamFormat("flac"))
         val quickLossy = FakeSource("JioSaavn", answerAfterMs = 5, format = StreamFormat("mp4", kbps = 320))
@@ -1429,6 +1533,9 @@ class SourcesTest {
         assertEquals("Ricky's Addon", source.displayName)
         assertEquals("flac", stream.format.codec)
         assertFalse("the patient lookup cancelled the later source", slowLossless.cancelled)
+        } finally {
+            AppSettings.audioQualityWifi.value = wifi
+        }
     }
 
     /**

@@ -13,7 +13,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import com.music.bitchord.playback.audio.LosslessOutput
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -100,6 +102,9 @@ import com.music.bitchord.data.sources.SourceConfig
 import com.music.bitchord.data.sources.SourceHealth
 import com.music.bitchord.data.sources.SourceKind
 import com.music.bitchord.data.sources.SourceRegistry
+import com.music.bitchord.data.sources.mornye.SflxCatalog
+import com.music.bitchord.data.sources.mornye.SflxHost
+import com.music.bitchord.data.sources.mornye.SflxSignedSession
 import com.music.bitchord.ui.components.AddonEditorAlert
 import dev.chrisbanes.haze.HazeState
 import kotlinx.coroutines.launch
@@ -143,10 +148,31 @@ fun SourcesScreen(
     onEditSmb: () -> Unit,
     /** Opens the full-window warning before JioSaavn is opted into. */
     onConfirmJioSaavn: () -> Unit,
+    /** Opens the install-from-link sheet for a Mornye `.sflx` extension. */
+    onInstallExtension: () -> Unit,
+    /** Opens one installed extension's own settings, by manifest id. */
+    onEditExtension: (String) -> Unit,
+    /** A plain tap on an extension's row: open its verification page. */
+    onVerifyExtension: (String) -> Unit = onEditExtension,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val configs by SourceRegistry.configs.collectAsStateWithLifecycle()
+    // Installed extensions are module-kind sources whose address is `sflx://…`.
+    // Named out here because they are drawn in their own group below and must
+    // not be drawn in the one above as well.
+    val extensions = configs.filter { SflxHost.extensionIdOf(it.baseUrl) != null }
+    // The extensions that are *not* sources: they can describe tracks or
+    // answer lyrics, but they serve no audio, so they take no place in the
+    // ranking above and have no row there. They are still installed packages,
+    // and their own settings — a subscriber token, a region — have to be
+    // reachable somewhere, or an extension that answers nothing is an
+    // extension nobody can fix.
+    val installedExtensions by SflxCatalog.installed.collectAsStateWithLifecycle()
+    val otherExtensions = installedExtensions.filter { installed ->
+        extensions.none { it.id == SflxCatalog.configIdOf(installed.id) }
+    }
+    val extensionStatuses by SflxCatalog.statuses.collectAsStateWithLifecycle()
     val wifiQuality by AppSettings.audioQualityWifi.collectAsStateWithLifecycle()
     val cellularQuality by AppSettings.audioQualityCellular.collectAsStateWithLifecycle()
     val metered by AppSettings.meteredConnection.collectAsStateWithLifecycle()
@@ -263,7 +289,10 @@ fun SourcesScreen(
             // under a second heading would break the one thing this screen is
             // for.
             val addons = configs.filter { it.kind.isUserAdded }
-            val fixed = configs.filterNot { it.kind.isUserAdded }
+            // Extensions are filtered out here — see the `extensions` list at
+            // the top of the screen — so that they are drawn once, in their own
+            // group, where they can be named and opened.
+            val fixed = configs.filterNot { it.kind.isUserAdded || SflxHost.extensionIdOf(it.baseUrl) != null }
                 .sortedBy { it.kind.rank }
 
             val row: @Composable (Int, SourceConfig, (@Composable () -> Unit)?) -> Unit =
@@ -332,6 +361,88 @@ fun SourcesScreen(
             RowDivider()
             AddSourceRow(
                 onClick = { onEditSource(SourceConfig(kind = SourceKind.ADDON)) },
+            )
+        }
+
+        // Installed extensions, in their own group.
+        //
+        // A group rather than rows inside the one above, because they are not
+        // something the listener typed a URL for: they are packages on this
+        // device, each with its own name, version, settings and remove button.
+        // The group also owns the way in — a link — which is the only door this
+        // app has to an extension, since none is bundled with it.
+        SettingsGroup(header = "Extensions") {
+            if (extensions.isEmpty() && otherExtensions.isEmpty()) {
+                SettingsRow(
+                    title = "No extensions installed",
+                    subtitle = "Extensions are separate downloads. Paste a link to add one.",
+                )
+            } else {
+                val extensionRow: @Composable (Int, SourceConfig, (@Composable () -> Unit)?) -> Unit =
+                    { position, config, handle ->
+                        val manifest = SflxCatalog.installed.value.firstOrNull { config.id == SflxCatalog.configIdOf(it.id) }
+                        val extensionId = SflxHost.extensionIdOf(config.baseUrl).orEmpty()
+                        SourceRow(
+                            position = position,
+                            config = config,
+                            health = health[config.id],
+                            skippedByQuality = config.enabled && !ceiling.permits(config.kind),
+                            awaitingOutput = if (config.enabled && config.awaitsLosslessOutput) losslessOutput else null,
+                            onMetered = metered == true,
+                            ceiling = ceiling,
+                            statusBadge = extensionStatuses[extensionId]?.badge(),
+                            // An extension that serves no audio has to say so
+                            // on its row. It is a source — its rows are the
+                            // catalogue's own — but pressing play on one of
+                            // them serves the track from somewhere else, and
+                            // the listener is entitled to know that before
+                            // they press it rather than after.
+                            subtitleOverride = manifest?.takeIf { !it.manifest.isDownloadProvider }
+                                ?.let { installed ->
+                                    if (installed.manifest.isLyricsProvider) {
+                                        "Metadata and lyrics — no audio"
+                                    } else {
+                                        "Metadata — no audio"
+                                    }
+                                },
+                            // Tap is the way through the door: an extension
+                            // that cannot serve anything until the listener
+                            // has proved themselves opens that page. Hold
+                            // opens its own settings — the questions its
+                            // manifest declared, and the way to remove it —
+                            // because there is no address to type.
+                            onClick = { onVerifyExtension(extensionId) },
+                            onLongClick = { onEditExtension(extensionId) },
+                            onToggle = { SourceRegistry.setEnabled(config.id, it) },
+                            handle = handle,
+                        )
+                    }
+                ReorderableAddons(
+                    addons = extensions,
+                    onReorder = { SourceRegistry.reorderExtensions(it.map(SourceConfig::id)) },
+                    row = extensionRow,
+                )
+                // The packages that are not sources at all: a lyrics-only
+                // extension, which answers words and serves no rows of its
+                // own. It keeps a plain row because its settings — a
+                // subscriber token — are the only way to fix it, and a
+                // package nobody can reach is a package nobody can fix.
+                otherExtensions.forEach { installed ->
+                    SettingsRow(
+                        title = installed.manifest.displayName,
+                        subtitle = if (installed.manifest.isLyricsProvider) {
+                            "Lyrics only — no audio"
+                        } else {
+                            installed.manifest.description.ifBlank { "v${installed.manifest.version}" }
+                        },
+                        onClick = { onEditExtension(installed.id) },
+                    )
+                }
+            }
+            RowDivider()
+            AddSourceRow(
+                onClick = onInstallExtension,
+                title = "Install from a link",
             )
         }
 
@@ -669,7 +780,7 @@ private const val SWAP_THRESHOLD = 0.6f
  * put another one in here".
  */
 @Composable
-private fun AddSourceRow(onClick: () -> Unit) {
+private fun AddSourceRow(onClick: () -> Unit, title: String? = null) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -690,7 +801,12 @@ private fun AddSourceRow(onClick: () -> Unit) {
         Spacer(Modifier.width(ICON_GAP))
         Column(Modifier.weight(1f)) {
             Text(
-                text = stringResource(R.string.add_addon),
+                // Two calls to this row, two different things being added: a
+                // source the listener pastes a URL for, and an extension
+                // package. The label is what tells them apart, and the detail
+                // line underneath stays the same because the instruction — paste
+                // a link — is the same.
+                text = title ?: stringResource(R.string.add_addon),
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.primary,
             )
@@ -791,6 +907,24 @@ private fun SourceRow(
     health: SourceHealth?,
     onClick: (() -> Unit)?,
     onToggle: (Boolean) -> Unit,
+    /**
+     * What a press-and-hold does. For an extension that is its own settings —
+     * the questions its manifest declared, and the way to remove it — while a
+     * plain tap is the thing that unblocks it: the verification page.
+     */
+    onLongClick: (() -> Unit)? = null,
+    /** The extension's signed-session state, when it has one. See [SourceStatusBadge]. */
+    statusBadge: SourceStatusBadge? = null,
+    /**
+     * What the line under the name says, when the row has something of its
+     * own to say.
+     *
+     * A source that serves no audio says exactly that, in place of the
+     * health line: the listener is looking at a source and pressing play on
+     * one of its rows, and the one fact that matters is that this row cannot
+     * be the thing that plays.
+     */
+    subtitleOverride: String? = null,
     /** On, but skipped by the ceiling the current connection is set to. */
     skippedByQuality: Boolean = false,
     /** On, but its addon needs a lossless output and this is what is connected instead. Null when not waiting. */
@@ -810,10 +944,18 @@ private fun SourceRow(
     // switch stays where the user left it, so the row reads "on, but not
     // today" rather than "off".
     val dimmed = !config.enabled || skippedByQuality || awaitingOutput != null
+    val rowModifier = if (onLongClick != null) {
+        Modifier.combinedClickable(
+            onClick = { onClick?.invoke() },
+            onLongClick = onLongClick,
+        )
+    } else {
+        Modifier.clickable(enabled = onClick != null) { onClick?.invoke() }
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(enabled = onClick != null) { onClick?.invoke() }
+            .then(rowModifier)
             .heightIn(min = 60.dp)
             .padding(horizontal = ROW_INSET, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -859,6 +1001,12 @@ private fun SourceRow(
                 // going to be asked at all is not usefully described by
                 // whether its server answered a probe.
                 text = when {
+                    // The row's own statement comes first: what a source *is*
+                    // outranks both the ceiling and the health line. A
+                    // catalogue that serves no audio says so whatever the
+                    // connection is set to, and it is not a fault — so it is
+                    // not dressed as one either.
+                    subtitleOverride != null -> subtitleOverride
                     // Outranks the ceiling: this one is not reached on *any*
                     // connection until the output changes.
                     awaitingOutput != null -> when {
@@ -886,11 +1034,24 @@ private fun SourceRow(
                     // painting that red trains people to ignore the colour by
                     // the time it means something.
                     skippedByQuality -> MaterialTheme.colorScheme.onSurfaceVariant
+                    subtitleOverride != null -> MaterialTheme.colorScheme.onSurfaceVariant
                     health is SourceHealth.Rejected -> MaterialTheme.colorScheme.error
                     else -> MaterialTheme.colorScheme.onSurfaceVariant
                 },
                 maxLines = 2,
             )
+            statusBadge?.let { badge ->
+                Text(
+                    text = badge.text,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (badge.warning) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    maxLines = 2,
+                )
+            }
         }
         Spacer(Modifier.width(8.dp))
         Switch(
@@ -911,9 +1072,31 @@ private fun SourceRow(
     }
 }
 
+/**
+ * What an extension's signed session is doing, as one line under its name.
+ *
+ * An extension whose manifest declares a `signedSession` cannot serve anything
+ * until the gateway has let it in, and the two states a listener can act on are
+ * "not verified yet" and "verified, until". A null badge is the honest answer
+ * for an extension that never asked for a session — it has no state to show.
+ */
+private data class SourceStatusBadge(val text: String, val warning: Boolean)
+
+private fun SflxSignedSession.Snapshot.badge(): SourceStatusBadge = when {
+    authenticated -> SourceStatusBadge("Verified${expiryNote()}", false)
+    else -> SourceStatusBadge("Needs verification — tap to verify", true)
+}
+
+private fun SflxSignedSession.Snapshot.expiryNote(): String {
+    val at = SflxSignedSession.parseTime(expiresAt) ?: return ""
+    val text = java.text.DateFormat
+        .getDateTimeInstance(java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT)
+        .format(java.util.Date(at))
+    return " · until $text"
+}
+
 @Composable
-private fun AudioQuality.localizedLabel(): String = stringResource(
-    when (this) {
+private fun AudioQuality.localizedLabel(): String = stringResource(    when (this) {
         AudioQuality.LOW -> R.string.low
         AudioQuality.MEDIUM -> R.string.medium
         AudioQuality.HIGH -> R.string.high

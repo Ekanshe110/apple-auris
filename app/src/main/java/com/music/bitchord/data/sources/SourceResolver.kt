@@ -64,11 +64,14 @@ object SourceResolver {
         // sources. It was a switch whose only real effect was to downgrade the
         // one source that could do better.
         return when {
-            // The immersive rung is the lossless walk plus an Atmos answer
-            // preferred ahead of it: a track with no Atmos master must still
-            // play its FLAC, and [preferred]/[isBetter] already put an
-            // immersive rendition first when one is on offer.
-            ceiling == AudioQuality.DOLBY || ceiling == AudioQuality.LOSSLESS -> StreamRequest.Lossless
+            // The immersive rung is its own request rather than the lossless
+            // one with a flag on it: the two answers are different files, and a
+            // request that could not say which it wanted would be answered
+            // with the spatial mix by every source that holds one. The
+            // fallback is the lossless walk — a track with no Atmos master must
+            // still play its FLAC.
+            ceiling == AudioQuality.DOLBY -> StreamRequest.Atmos
+            ceiling == AudioQuality.LOSSLESS -> StreamRequest.Lossless
             ceiling.maxKbps == Int.MAX_VALUE -> StreamRequest.Best
             else -> StreamRequest.Capped(ceiling.maxKbps)
         }
@@ -100,6 +103,11 @@ object SourceResolver {
     fun requestForDownload(
         quality: DownloadQuality = AppSettings.downloadQuality.value,
     ): StreamRequest = when {
+        // The immersive rung first, because it is the one that also wants a
+        // bit-exact answer: the walk it asks for is the spatial mix where the
+        // catalogue holds one and the lossless ladder below it where it does
+        // not.
+        quality.wantsAtmos -> StreamRequest.Atmos
         quality.keepsLossless -> StreamRequest.Lossless
         quality.maxKbps == Int.MAX_VALUE -> StreamRequest.Best
         else -> StreamRequest.Capped(quality.maxKbps)
@@ -160,10 +168,20 @@ object SourceResolver {
         // asking first. This is the whole reason the list is ordered — it is
         // what makes "my own FLAC of this, if I have one, else stream it"
         // expressible.
-        if (request is StreamRequest.Lossless && pinned?.kind?.canServeLossless != true) {
+        if (request.wantsLossless && pinned?.kind?.canServeLossless != true) {
             for (source in rankedAbove(configId, active)) {
                 if (!source.kind.canServeLossless) continue
-                val upgraded = matchAndStream(source, target, request) ?: continue
+                // The length bar, as everywhere a recording is swapped for
+                // another one: a replacement has to be the same recording, and
+                // a runtime is the one statement about a recording that cannot
+                // be argued with. A row that states no runtime cannot be
+                // checked, and is not a replacement.
+                val upgraded = matchAndStream(
+                    source = source,
+                    target = target,
+                    request = request,
+                    strictLength = target.durationSec != null,
+                ) ?: continue
                 // Only a genuinely lossless answer is an upgrade — and the
                 // immersive mix counts, because the Dolby rung asks for the
                 // lossless walk with an Atmos answer preferred ahead of it.
@@ -191,8 +209,21 @@ object SourceResolver {
         // user asked for, and another source having it is not unlikely — this
         // is the difference between a dead server skipping the queue forward
         // and a dead server being invisible.
+        //
+        // Sources that serve no audio are left out of the walk: a metadata
+        // catalogue cannot answer a stream, and asking one spends a search
+        // and a call to be told what was already known — that it cannot.
         val (fallbackSource, stream) =
-            bestAcross(active.filterNot { it.configId == configId }, target, request) ?: return null
+            bestAcross(
+                active.filterNot { it.configId == configId }.filter { it.servesAudio },
+                target,
+                request,
+                // A fallback is a substitution: this track's own source failed,
+                // and what plays instead has to be the same recording. The
+                // runtime is what says so, and a row that states none cannot
+                // be checked.
+                strictLength = target.durationSec != null,
+            ) ?: return null
         TrackLog.d(TAG, "fallback: '${target.title}' served by ${fallbackSource.displayName}")
         return stream
     }
@@ -232,8 +263,15 @@ object SourceResolver {
         val candidates = candidatesForYouTube(SourceRegistry.activeForPlayback())
         if (candidates.isEmpty()) return null
         val request = requestForNow()
-        val (source, stream) = bestAcross(candidates, target, request)
-            ?: return null
+        // A substitution, and so held to the length: what plays in place of
+        // the requested track has to be the same recording, and the runtime is
+        // the one statement about a recording that cannot be argued with.
+        val (source, stream) = bestAcross(
+            candidates,
+            target,
+            request,
+            strictLength = target.durationSec != null,
+        ) ?: return null
         // Says what was found, not what the caller will do with it. This
         // line used to read "substituted" unconditionally, including for
         // streams the caller went on to refuse — which made a log of a
@@ -301,7 +339,13 @@ object SourceResolver {
         val quick = candidatesForYouTube(SourceRegistry.activeForPlayback())
             .filter { it.kind.worthPrefetching }
         if (quick.isEmpty()) return null
-        val (source, stream) = bestAcross(quick, target, requestForNow()) ?: return null
+        // A substitution, and so held to the length: see [substituteForYouTube].
+        val (source, stream) = bestAcross(
+            quick,
+            target,
+            requestForNow(),
+            strictLength = target.durationSec != null,
+        ) ?: return null
         TrackLog.d(
             TAG,
             "warmed: '${target.title}' from ${source.displayName} at ${stream.format.summary}",
@@ -335,13 +379,29 @@ object SourceResolver {
      * The caller must pin the result with [StreamChoice] before caching a byte
      * of it: see [prefetchSubstitute], which has the same requirement and the
      * corruption that follows from skipping it.
+     *
+     * @param servedBy the source the track came from, when it came from one.
+     *   It is asked even when the listener ranked it below YouTube, because it
+     *   is the source that holds this recording and the only one that can hold
+     *   a better tier of it — and for a file on the device it is the source
+     *   that made the file, which is the one place a better copy can come
+     *   from at all.
      */
-    suspend fun prepareForPlayback(target: TrackMatcher.Target): SourceStream? {
+    suspend fun prepareForPlayback(
+        target: TrackMatcher.Target,
+        servedBy: String? = null,
+    ): SourceStream? {
         if (target.title.isBlank() || target.isVideo) return null
-        val candidates = candidatesForYouTube(SourceRegistry.activeForPlayback())
-        if (candidates.isEmpty()) return null
+        val active = SourceRegistry.activeForPlayback()
+        val pool = upgradeCandidates(
+            candidates = candidatesForYouTube(active),
+            active = active,
+            servedBy = servedBy,
+            reaskServedBy = servedBy != null,
+        )
+        if (pool.isEmpty()) return null
         val (source, stream) = bestAcross(
-            candidates,
+            pool,
             target,
             requestForNow(),
             waitForAll = true,
@@ -356,6 +416,86 @@ object SourceResolver {
             TAG,
             "prepared next: '${target.title}' from ${source.displayName} at ${stream.format.summary}" +
                 if (stream.belowRequest) " (below request)" else "",
+        )
+        return stream
+    }
+
+    /**
+     * A cheap copy of [target] for the analyser to measure, or null when no
+     * enabled source has one.
+     *
+     * The analyser needs the *recording*, not the quality: a tempo, a key and a
+     * beat grid are the same numbers whether they were read off a 24-bit/96kHz
+     * master or off a 320kbps transcode of it. So the copy asked for here is
+     * deliberately the cheap one — [StreamRequest.Best] — and the point of
+     * asking for it separately is the size:
+     *
+     *  - twelve seconds of a 96kHz ALAC master is 6.7MB, and the analyser
+     *    wants twelve seconds of *something*;
+     *  - twelve seconds of a 320kbps AAC is 480kB, a fifteenth of the traffic,
+     *    and it arrives before the listener has finished waiting for the first
+     *    note of the next track.
+     *
+     * That difference is the whole of the "Automix analysis fails nine times
+     * in ten on a Spotify catalogue" report. A catalogue row is matched to
+     * whichever source holds it, and that source is then asked for the quality
+     * the listener chose — a lossless master — so the bytes the analyser
+     * waited for were the master's. On a connection that serves them at a few
+     * hundred kilobytes a second they take half a minute to arrive, and they
+     * arrive *competing with the track actually playing* for the same link,
+     * which is where the stutter came from too.
+     *
+     * The copy is the same recording, matched the same way — on title, artist
+     * and runtime — so the evidence it produces describes the track being
+     * played. A copy whose runtime disagrees is refused by the analyser
+     * itself; see [com.music.bitchord.playback.smart.TrackAnalyzer].
+     *
+     * When the track's own source and track id are known, that source is asked
+     * first, for the cheap tier of the very track already in hand: one
+     * `/stream` call, no search, and no question of whether the answer is the
+     * same recording. Only when it cannot answer is the name-matched walk
+     * above used.
+     */
+    suspend fun analysisCopy(
+        target: TrackMatcher.Target,
+        configId: String? = null,
+        trackId: String? = null,
+    ): SourceStream? {
+        if (target.title.isBlank() || target.isVideo) return null
+        val active = SourceRegistry.activeForPlayback()
+        if (active.isEmpty()) return null
+
+        // The track's own source, at the cheap tier. No search: the track id is
+        // already in hand, and the tier is the only thing that changes.
+        if (configId != null && trackId != null) {
+            val own = active.firstOrNull { it.configId == configId }
+            if (own != null) {
+                val stream = attempt(own) { own.stream(trackId, StreamRequest.Best) }
+                    ?.copy(sourceConfigId = own.configId)
+                if (stream != null) {
+                    TrackLog.d(
+                        TAG,
+                        "analysis copy: '${target.title}' from ${own.displayName} at ${stream.format.summary}",
+                    )
+                    return stream
+                }
+            }
+        }
+
+        // Otherwise the same question every other cross-source path asks, at
+        // the cheap tier rather than the requested one.
+        val candidates = candidatesForYouTube(active)
+        if (candidates.isEmpty()) return null
+        val (source, stream) = bestAcross(
+            candidates,
+            target,
+            StreamRequest.Best,
+            strictLength = target.durationSec != null,
+            requireSharedArtist = true,
+        ) ?: return null
+        TrackLog.d(
+            TAG,
+            "analysis copy: '${target.title}' from ${source.displayName} at ${stream.format.summary}",
         )
         return stream
     }
@@ -410,16 +550,37 @@ object SourceResolver {
      *   stream already playing — which [worthSwapping] would reject anyway,
      *   but not before spending a search and a stream call on it. See the
      *   'isn't worth swapping ... off' log line this was written to stop.
+     * @param reaskServedBy whether that source is asked anyway. True when
+     *   what is playing is known to be lossy and a bit-exact copy was asked
+     *   for: a source that holds several tiers is not deterministic across
+     *   calls — its first answer can be a tier it has since warmed up, its
+     *   own fallback ladder can have been walked further this time than last
+     *   — and an extension is the only source that can hold the better tier
+     *   at all. Leaving it out is what made "Upgrade quality" do nothing on
+     *   every track an extension was serving.
      */
     suspend fun upgradeFor(
         target: TrackMatcher.Target,
         playing: StreamFormat? = null,
         servedBy: String? = null,
+        reaskServedBy: Boolean = false,
+        /**
+         * Whether this swap was asked for — asked per candidate rather than
+         * once, so a request that arrives while the search is running is
+         * still honoured. See [worthSwapping].
+         */
+        explicit: () -> Boolean = { false },
     ): SourceStream? {
         if (target.title.isBlank() || target.durationSec == null || target.isVideo) return null
         val request = requestForNow()
-        val candidates = candidatesForYouTube(SourceRegistry.activeForPlayback())
-        if (candidates.isEmpty()) return null
+        val active = SourceRegistry.activeForPlayback()
+        val pool = upgradeCandidates(
+            candidates = candidatesForYouTube(active),
+            active = active,
+            servedBy = servedBy,
+            reaskServedBy = reaskServedBy,
+        )
+        if (pool.isEmpty()) return null
         // Every source gets asked, whether or not it can serve lossless, and
         // they are asked at once.
         //
@@ -449,14 +610,14 @@ object SourceResolver {
         // and the seam then landed mid-song rather than near its start. Raced,
         // the same swap happens inside a second.
         val (source, chosen) = bestAcross(
-            candidates.filterNot { it.configId == servedBy },
+            pool,
             target,
             request,
             waitForAll = true,
             strictLength = true,
             requireSharedArtist = true,
         ) { candidate, stream ->
-            worthSwapping(stream.format, playing).also { worth ->
+            worthSwapping(stream.format, playing, explicit()).also { worth ->
                 // Named rather than skipped silently. This is the one refusal
                 // in the upgrade path that discards a stream already found,
                 // matched and length-checked, and a silent skip reads in the log
@@ -559,16 +720,16 @@ object SourceResolver {
         request: StreamRequest = requestForDownload(),
     ): SourceStream? = coroutineScope {
         if (target.title.isBlank()) return@coroutineScope null
-        val wantsLossless = when (request) {
-            is StreamRequest.Lossless -> true
-            is StreamRequest.Best -> false
-            // Standard, and the one rung the sources are no use for: it is a
-            // ceiling of 128kbps chosen to fit more on the device, and a source
-            // has no way to be asked for *that* rung rather than for the best it
-            // has. JioSaavn's 320 is not a better answer to it, it is the wrong
-            // answer to it. YouTube's ladder is the only one that can be capped.
-            is StreamRequest.Capped -> return@coroutineScope null
-        }
+        // Standard, and the one rung the sources are no use for: it is a
+        // ceiling of 128kbps chosen to fit more on the device, and a source
+        // has no way to be asked for *that* rung rather than for the best it
+        // has. JioSaavn's 320 is not a better answer to it, it is the wrong
+        // answer to it. YouTube's ladder is the only one that can be capped.
+        if (request is StreamRequest.Capped) return@coroutineScope null
+        // The immersive rung counts as bit-exact: it falls back down the
+        // lossless ladder rather than to a lossy file, so a source that can
+        // only offer a FLAC is still the right source to ask.
+        val wantsLossless = request.wantsLossless
         // [SourceRegistry.active] rather than the playback list: a download is
         // not budgeted by the connection's streaming ceiling. What it keeps is
         // [DownloadQuality]'s answer and what it may spend is
@@ -726,7 +887,11 @@ object SourceResolver {
      * narrow enough to be codec-sensitive would be a margin that buys a seam
      * in the audio for nothing. 160 to 320 clears it; 128 to 192 does not.
      */
-    internal fun worthSwapping(candidate: StreamFormat, playing: StreamFormat?): Boolean {
+    internal fun worthSwapping(
+        candidate: StreamFormat,
+        playing: StreamFormat?,
+        explicit: Boolean = false,
+    ): Boolean {
         // Never away from an immersive mix. A FLAC is a better *copy* and a
         // worse *mix* once Atmos is what the listener chose, and cutting one in
         // over the other mid-song is a downgrade dressed as an upgrade.
@@ -739,7 +904,15 @@ object SourceResolver {
         // it is the rung below, cut into a track that is already playing, with
         // a seam in the audio to prove it. So the only late swap the rung
         // allows is an Atmos answer itself.
-        if (immersiveRungActive() && playing?.isDolbyAtmos != true &&
+        //
+        // Unless the swap was asked for, or what is playing is known to be
+        // lossy. Both are the same fact seen from two sides: a bit-exact copy
+        // over a lossy stream is a better copy of the same recording, and the
+        // app's own live path serves exactly that when a track has no spatial
+        // mix — "a track with no Atmos master must still play its FLAC". The
+        // refusal made "Upgrade quality" do nothing at all on a device whose
+        // rung was Dolby, which is the complaint it was written to answer.
+        if (!explicit && immersiveRungActive() && playing?.isDolbyAtmos != true &&
             candidate.isDolbyAtmos == false && candidate.isLossless == true
         ) {
             return false
@@ -764,7 +937,7 @@ object SourceResolver {
      * below it.
      */
     internal fun immersiveRungActive(): Boolean =
-        AppSettings.effectiveAudioQuality == AudioQuality.DOLBY && DeviceCodecs.playsDolbyAtmos
+        DeviceCodecs.playsDolbyAtmos && requestForNow().wantsAtmos
 
     /**
      * Whether two runtimes are close enough to be the same recording, for a
@@ -810,9 +983,100 @@ object SourceResolver {
      * question it gates is whether a search is worth starting at all: see
      * [QualityUpgrade.couldStillUpgrade], which is asked on every progress
      * sample for the track that is playing.
+     *
+     * @param alsoConfigId a source that counts whatever rank the listener gave
+     *   it. The source a file was downloaded *from* is one of these: it holds
+     *   that recording, and it is the only one that can hold a better tier of
+     *   it. Leaving it out made "upgrade local music" do nothing at all on
+     *   every track an extension had downloaded — the file was already there,
+     *   the extension held the FLAC, and the question was never asked.
      */
-    fun canServeLossless(): Boolean =
-        candidatesForYouTube(SourceRegistry.activeForPlayback()).any { it.kind.canServeLossless }
+    fun canServeLossless(alsoConfigId: String? = null): Boolean {
+        val active = SourceRegistry.activeForPlayback()
+        return losslessAvailable(candidatesForYouTube(active), active, alsoConfigId)
+    }
+
+    /**
+     * The same question, asked of lists rather than of the registry — so it can
+     * be read, and tested, on its own.
+     *
+     * @param candidates the sources ranked above YouTube.
+     * @param active every enabled source, in rank order.
+     * @param alsoConfigId a source counted whatever its rank.
+     */
+    internal fun losslessAvailable(
+        candidates: List<MusicSource>,
+        active: List<MusicSource>,
+        alsoConfigId: String?,
+    ): Boolean {
+        if (candidates.any { it.kind.canServeLossless }) return true
+        val extra = alsoConfigId?.let { id -> active.firstOrNull { it.configId == id } }
+            ?: return false
+        // A source that serves no audio cannot serve lossless either, whatever
+        // its kind claims: a metadata-only extension is a catalogue.
+        return extra.servesAudio && extra.kind.canServeLossless
+    }
+
+    /**
+     * Whether the named source is enabled and can serve audio.
+     *
+     * The question a source-backed track asks about the source behind it: a
+     * source that has been switched off, or that serves no audio at all, is
+     * not somewhere a better copy can come from.
+     */
+    fun canServe(configId: String?): Boolean =
+        servingAvailable(SourceRegistry.activeForPlayback(), configId)
+
+    /**
+     * The same question, asked of a list rather than of the registry — so it
+     * can be read, and tested, on its own.
+     *
+     * @param active every enabled source, in rank order.
+     * @param configId the source behind the track, or null when there is none.
+     */
+    internal fun servingAvailable(active: List<MusicSource>, configId: String?): Boolean {
+        if (configId == null) return false
+        return active.any { it.configId == configId && it.servesAudio }
+    }
+
+    /**
+     * The sources the second look asks.
+     *
+     * Normally that is the sources ranked above YouTube, without the one
+     * already serving the track: the same source asked the same question
+     * usually answers the same way, and the answer is already playing — so
+     * asking it again spends a search and a stream call to reproduce it.
+     *
+     * That is true of a catalogue, where the copy does not change under the
+     * search. It is not true of a source that holds several tiers of one
+     * recording: an extension asked for a bit-exact copy and answered with a
+     * lossy one because its own fallback ladder was walked, and asked again it
+     * can answer with the tier it wanted the first time — and it is the only
+     * source that can, because nothing else in the list holds that recording
+     * in that tier.
+     *
+     * So when the source is asked again ([reaskServedBy]) it is put back into
+     * the pool, *even if the listener ranked it below YouTube*: it is the
+     * source that is playing the track, and everything above it does not hold
+     * the copy in question. Leaving it out is what made "Upgrade quality" do
+     * nothing at all on every track an extension was serving.
+     */
+    internal fun upgradeCandidates(
+        candidates: List<MusicSource>,
+        active: List<MusicSource>,
+        servedBy: String?,
+        reaskServedBy: Boolean,
+    ): List<MusicSource> {
+        if (!reaskServedBy) {
+            return candidates.filterNot { it.configId == servedBy }
+        }
+        // The serving source is put back only if it can serve audio at all: a
+        // metadata-only extension answers a search with a catalogue and cannot
+        // hand over a stream, so asking it again would spend a search to be
+        // told what was already known.
+        val serving = servedBy?.let { id -> active.firstOrNull { it.configId == id && it.servesAudio } }
+        return if (serving != null && serving !in candidates) candidates + serving else candidates
+    }
 
     /**
      * The sources a YouTube track may be served from, in rank order.
@@ -823,10 +1087,16 @@ object SourceResolver {
      * every enabled source instead: there is no YouTube rung left to protect,
      * and the ordinary ranking already says the addons come first. The two
      * readings agree on the empty list, which is a walk with nothing to ask.
+     *
+     * Sources that serve no audio are left out: a metadata-only extension
+     * cannot answer a stream, and every list this feeds is a question about
+     * audio. Its own value — the catalogue's rows, with their artwork and
+     * album — is collected where those are wanted, in the search.
      */
     internal fun candidatesForYouTube(active: List<MusicSource>): List<MusicSource> {
         val at = active.indexOfFirst { it.kind == SourceKind.YOUTUBE }
-        return if (at < 0) active else active.take(at)
+        val ranked = if (at < 0) active else active.take(at)
+        return ranked.filter { it.servesAudio }
     }
 
     /**
@@ -1098,6 +1368,7 @@ object SourceResolver {
         matches: List<Song>,
         target: TrackMatcher.Target,
         wantsLossless: Boolean,
+        wantsAtmos: Boolean = atmosWanted(),
     ): List<Song> {
         val sameLength = matches.filter { TrackMatcher.withinSeconds(it, target, SAME_RECORDING_SEC) }
         val eligible = sameLength.ifEmpty { matches }
@@ -1110,7 +1381,7 @@ object SourceResolver {
         // [streamBest] stops at the first row that answers, and an Atmos
         // answer on a device that cannot play it was already refused upstream
         // by [ModuleSource.unplayable].
-        if (atmosWanted()) {
+        if (wantsAtmos) {
             val immersiveFirst = eligible.sortedByDescending { it.sourceQuality == ModuleSource.DOLBY }
             if (immersiveFirst.firstOrNull()?.sourceQuality == ModuleSource.DOLBY) return immersiveFirst
         }
@@ -1122,11 +1393,14 @@ object SourceResolver {
 
     /**
      * Whether an immersive mix is worth preferring right now — device
-     * capability plus the listener's answer, which is either the master switch
-     * or the Dolby Atmos rung on this connection. The same two gates the
-     * playback side enforces in [ModuleSource.unplayable] and the addon path
-     * sends its `?atmos=` hint on, asked in the one place that chooses between
-     * rows.
+     * capability plus the listener's answer, which is the Dolby Atmos rung on
+     * this connection. The same two gates the playback side enforces in
+     * [ModuleSource.unplayable] and the addon path sends its `?atmos=` hint on,
+     * asked in the one place that chooses between rows.
+     *
+     * The default for [preferred], and the *streaming* answer: a request that
+     * carries its own signal — the immersive rung, or a download that asked
+     * for the spatial mix — passes it in instead.
      */
     private fun atmosWanted(): Boolean =
         DeviceCodecs.playsDolbyAtmos && AppSettings.wantsDolbyAtmos
@@ -1137,8 +1411,13 @@ object SourceResolver {
         target: TrackMatcher.Target,
         request: StreamRequest,
     ): SourceStream? {
-        val wantsLossless = request is StreamRequest.Lossless
-        val ordered = preferred(matches, target, wantsLossless)
+        val wantsLossless = request.wantsLossless
+        // The request's own signal, not the streaming rung's: a download that
+        // asked for the spatial mix wants it even when the stream on this
+        // connection is plain lossless, and a download that did not ask for it
+        // must not be given one because the stream happens to be Dolby.
+        val wantsAtmos = DeviceCodecs.playsDolbyAtmos && request.wantsAtmos
+        val ordered = preferred(matches, target, wantsLossless, wantsAtmos)
         var settleFor: SourceStream? = null
         for (match in ordered.take(STREAM_ATTEMPTS)) {
             val trackId = SourceRegistry.parseTrackKey(match.videoId)?.second ?: match.videoId

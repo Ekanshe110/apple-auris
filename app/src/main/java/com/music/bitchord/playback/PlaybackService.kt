@@ -156,6 +156,8 @@ import com.music.bitchord.data.sources.SourceResolver
 import com.music.bitchord.data.sources.SourceStream
 import com.music.bitchord.data.sources.StreamFormat
 import com.music.bitchord.data.sources.TrackMatcher
+import com.music.bitchord.data.sources.mornye.SflxCatalog
+import com.music.bitchord.data.sources.mornye.SflxHost
 import com.music.bitchord.playback.smart.AutomixAnalysisSource
 import com.music.bitchord.playback.smart.VersionAudioAligner
 import com.music.bitchord.widget.MediaWidget
@@ -1488,6 +1490,78 @@ class PlaybackService : MediaLibraryService() {
             if (dataSpec.uri.authority == "source") {
                 val directYouTube =
                     dataSpec.uri.getQueryParameter(DIRECT_YOUTUBE_PARAMETER) == "1"
+                // The track this is for, and the identity its stream is pinned
+                // under — see [StreamChoice].
+                val fullMediaId = mediaIdIn(dataSpec.uri)
+                val trackParam = dataSpec.uri.getQueryParameter("t")
+                val configId = dataSpec.uri.getQueryParameter("s")
+                if (!directYouTube) {
+                    // An upgraded item carries a marker and its stream has
+                    // already been found — see [QualityUpgrade]. Answered
+                    // before anything else, and without re-resolving: this
+                    // exact URL is what the player was told it was getting
+                    // when it agreed to the swap.
+                    //
+                    // It used to be unreachable here. [QualityUpgrade] keyed
+                    // its record by the `v` parameter, and a source-backed
+                    // track's URI has none — its identity is
+                    // `src:<config>::<track>` — so the upgrade of an
+                    // addon-served track could be found but never served.
+                    QualityUpgrade.forcedStream(dataSpec.uri)?.let { upgraded ->
+                        val upgradedName = upgraded.sourceConfigId
+                            ?.let { SourceRegistry.config(it)?.displayName } ?: "Upgrade"
+                        TrackLog.d(
+                            "BitChord",
+                            "serving upgraded ${fullMediaId ?: trackParam} " +
+                                "from ${Uri.parse(upgraded.url).host} " +
+                                "at ${dataSpec.position} (${upgraded.format.summary})",
+                            about = fullMediaId ?: trackParam,
+                        )
+                        NerdStats.onSourceStream(fullMediaId ?: trackParam, upgraded.format, upgradedName)
+                        if (fullMediaId != null) NerdStats.recordSource(fullMediaId, upgradedName)
+                        NerdStats.recordSource(trackParam, upgradedName)
+                        return@Resolver dataSpec.buildUpon()
+                            .setUri(Uri.parse(upgraded.url))
+                            .setHttpRequestHeaders(upgraded.headers)
+                            .build()
+                    }
+                    // The pin: one stream per track, however many times the
+                    // player opens it.
+                    //
+                    // Every re-open used to re-run the whole ladder — the
+                    // lossless walk, the search, the stream call — because
+                    // this branch had no memory of what it had already
+                    // answered. On a catalogue row that was three walks of
+                    // the ladder for one track, and the walk is exactly what
+                    // a listener waits for when they tap a radio row.
+                    //
+                    // The pin is held to one server for the same reason the
+                    // YouTube branch holds it: the cache entry is shared by
+                    // every writer, and two servers' bytes at the same
+                    // offsets are two different files.
+                    val pinned = fullMediaId?.let { StreamChoice.of(it) }
+                        ?.takeIf { serving ->
+                            // A source turned off after the pin was made does
+                            // not get to keep serving: "Off" has to mean off
+                            // for a row queued earlier too.
+                            serving.sourceConfigId?.let { id ->
+                                SourceRegistry.activeForPlayback().any { it.configId == id }
+                            } ?: true
+                        }
+                    if (pinned != null) {
+                        val pinnedName = pinned.sourceConfigId
+                            ?.let { SourceRegistry.config(it)?.displayName }
+                            ?: configId?.let { SourceRegistry.config(it)?.displayName }
+                            ?: "Source"
+                        NerdStats.onSourceStream(fullMediaId ?: trackParam, pinned.format, pinnedName)
+                        if (fullMediaId != null) NerdStats.recordSource(fullMediaId, pinnedName)
+                        NerdStats.recordSource(trackParam, pinnedName)
+                        return@Resolver dataSpec.buildUpon()
+                            .setUri(Uri.parse(pinned.url))
+                            .setHttpRequestHeaders(pinned.headers)
+                            .build()
+                    }
+                }
                 val stream = runBlocking(about) {
                     withTimeout(RESOLVE_TIMEOUT_MS) {
                         if (directYouTube) {
@@ -1503,26 +1577,30 @@ class PlaybackService : MediaLibraryService() {
                         "No enabled source could serve ${dataSpec.uri.getQueryParameter("n")}"
                     },
                 )
-                val configId = dataSpec.uri.getQueryParameter("s")
+                // Recorded before it is served, so the pin and the claim about
+                // this track agree about which server answered.
+                val serving = if (directYouTube || fullMediaId == null) {
+                    stream
+                } else {
+                    pinOrPinned(fullMediaId, stream, substituted = true)
+                }
                 val sourceName = if (directYouTube) {
                     "YouTube"
                 } else {
-                    stream.sourceConfigId?.let { SourceRegistry.config(it)?.displayName }
+                    serving.sourceConfigId?.let { SourceRegistry.config(it)?.displayName }
                         ?: configId?.let { SourceRegistry.config(it)?.displayName }
                         ?: "Source"
                 }
-                val trackParam = dataSpec.uri.getQueryParameter("t")
-                val fullMediaId = mediaIdIn(dataSpec.uri)
-                NerdStats.onSourceStream(fullMediaId ?: trackParam, stream.format, sourceName)
+                NerdStats.onSourceStream(fullMediaId ?: trackParam, serving.format, sourceName)
                 if (fullMediaId != null) {
                     NerdStats.recordSource(fullMediaId, sourceName)
                 }
                 NerdStats.recordSource(trackParam, sourceName)
                 return@Resolver dataSpec.buildUpon()
-                    .setUri(Uri.parse(stream.url))
+                    .setUri(Uri.parse(serving.url))
                     .setHttpRequestHeaders(
-                        if (directYouTube) StreamResolver.mediaHeadersFor(stream.url)
-                        else stream.headers,
+                        if (directYouTube) StreamResolver.mediaHeadersFor(serving.url)
+                        else serving.headers,
                     )
                     .build()
             }
@@ -1735,6 +1813,51 @@ class PlaybackService : MediaLibraryService() {
                         .setHttpRequestHeaders(serving.headers)
                         .build()
                 }
+            // A row that exists only in Spotify's catalogue. There is no
+            // YouTube id behind it, so the sources are asked for the recording
+            // by name — which is the arrangement: Spotify supplies the row, a
+            // source supplies the bytes. A track none of them holds is a track
+            // that cannot play, and it says so instead of playing silence.
+            if (videoId.startsWith(SPOTIFY_ROW_PREFIX)) {
+                val target = SourceResolver.targetIn(dataSpec.uri)
+                val resolved = runBlocking(about) {
+                    val fromSources = withTimeoutOrNull(SUBSTITUTE_TIMEOUT_MS) {
+                        SourceResolver.substituteForYouTube(target)
+                    }
+                    if (fromSources != null) return@runBlocking fromSources
+                    // Nobody holds this recording, but YouTube is still switched
+                    // on: ask it by name, which is the match the search used to
+                    // make. A Spotify row is worth playing from YouTube when
+                    // YouTube is what the listener left enabled.
+                    if (!SourceRegistry.youtubeEnabled()) return@runBlocking null
+                    val query = listOf(target.title, target.artist)
+                        .filter { it.isNotBlank() }
+                        .joinToString(" ")
+                    val rows: List<SearchResult> = try {
+                        YtMusicRepository.search(query, SearchFilter.SONGS).getOrNull().orEmpty()
+                    } catch (error: Exception) {
+                        emptyList()
+                    }
+                    val songs = rows.mapNotNull { row -> (row as? SearchResult.Track)?.song }
+                    val best = TrackMatcher.best(songs, target) ?: songs.firstOrNull()
+                    best?.let { song ->
+                        runCatching { StreamResolver.resolve(song.videoId) }
+                            .getOrNull()
+                            ?.let { url -> SourceStream(url, headers = StreamResolver.mediaHeadersFor(url)) }
+                    }
+                } ?: throw java.io.IOException(
+                    "no enabled source could serve '${target.title}'",
+                )
+                val serving = pinOrPinned(videoId, resolved, substituted = true)
+                val sourceName = serving.sourceConfigId
+                    ?.let { SourceRegistry.config(it)?.displayName } ?: "Module"
+                NerdStats.onSourceStream(videoId, serving.format, sourceName)
+                NerdStats.recordSource(videoId, sourceName)
+                return@Resolver dataSpec.buildUpon()
+                    .setUri(Uri.parse(serving.url))
+                    .setHttpRequestHeaders(serving.headers)
+                    .build()
+            }
             // A track queued from YouTube may be held by a source the user
             // ranked above it — see [SourceResolver.substituteForYouTube] and
             // [raceYouTubeOrModule]. Only worth the extra lookup when
@@ -2222,6 +2345,9 @@ class PlaybackService : MediaLibraryService() {
                 existing = listOf(radioSeed),
                 seedSong = radioSeed,
                 limit = INITIAL_STATION_TRACKS,
+                // A station, asked for by the track that is playing: on a
+                // Spotify session that is Spotify's own mix of that track.
+                station = true,
             ).getOrElse {
                 TrackLog.w(
                     "BitChord",
@@ -4470,6 +4596,23 @@ class PlaybackService : MediaLibraryService() {
     }
 
     /**
+     * What to tell the listener when the source serving [uri] could not answer
+     * because its signed session is not in order, or null when there is
+     * nothing to say.
+     *
+     * The extension is found through the source the track was queued from: the
+     * URI names the config, the config names the package, and the package
+     * knows whether its session is in order. An addon or a built-in source has
+     * no package behind it, and says nothing.
+     */
+    private fun verificationAdviceFor(uri: Uri?): String? {
+        val configId = uri?.getQueryParameter("s") ?: return null
+        val config = SourceRegistry.config(configId) ?: return null
+        val extensionId = SflxHost.extensionIdOf(config.baseUrl) ?: return null
+        return SflxCatalog.host?.verificationAdvice(extensionId)
+    }
+
+    /**
      * Puts a track that died mid-read back on its feet.
      *
      * Two things get thrown away before trying again, because both have been
@@ -4508,6 +4651,21 @@ class PlaybackService : MediaLibraryService() {
                 "$mediaId failed while decoding the Dolby stream (${error.errorCodeName}); recovering",
                 about = mediaId,
             )
+        }
+        // The source that was serving this track could not answer because its
+        // signed session is not in order, and the listener is the only one who
+        // can put that right.
+        //
+        // Said once per track: the advice is a fact about the extension rather
+        // than about this attempt, so repeating it on every retry would be
+        // noise, and the recovery below may well succeed on a different source
+        // — in which case the listener has been told something that is still
+        // true and still worth knowing.
+        if (attempts == 1) {
+            verificationAdviceFor(uri)?.let { advice ->
+                TrackLog.w("BitChord", advice, about = mediaId)
+                announce(advice)
+            }
         }
         // A local file that is not there is the one failure retrying cannot
         // touch, and the only one where the fix is to stop asking for the file.
@@ -4669,7 +4827,12 @@ class PlaybackService : MediaLibraryService() {
         // The same reasoning as [QualityUpgrade.refuseUpgrades] above, for the
         // substitution that happens *before* the first note rather than after.
         // Read before the forget below, which is what clears the evidence.
-        uri?.getQueryParameter("v")
+        //
+        // The media id, not the `v` parameter: a source-backed track's URI
+        // has no `v`, so its pin was never cleared here and a track that died
+        // on a substituted stream kept being served the same dead URL for the
+        // whole of the pin's life.
+        uri?.let { mediaIdIn(it) }
             ?.takeIf { diedOnModuleStream || StreamChoice.isSubstitute(it) }
             ?.let { videoId ->
                 StreamChoice.refuseSubstitutes(videoId)
@@ -4683,7 +4846,7 @@ class PlaybackService : MediaLibraryService() {
                 // just recovered to land on the same refusal.
                 QualityUpgrade.refuseUpgrades(videoId)
             }
-        uri?.getQueryParameter("v")?.let(StreamChoice::forget)
+        uri?.let { mediaIdIn(it) }?.let(StreamChoice::forget)
         scope.launch(TrackLog.about(mediaId)) {
             // Long enough for the released source to let go of the cache keys
             // about to be removed, short enough to read as a stutter.
@@ -5156,7 +5319,7 @@ class PlaybackService : MediaLibraryService() {
         val uri = item.localConfiguration?.uri
         val alreadyPending = QualityUpgrade.isPending(mediaId)
         val shelved = QualityUpgrade.shelvedFor(mediaId)
-        if (shelved == null && !alreadyPending && !QualityUpgrade.couldStillUpgrade(mediaId, uri)) return
+        if (shelved == null && !alreadyPending && !QualityUpgrade.couldStillUpgrade(mediaId, uri, byHand)) return
         if (upgradeJob?.isActive == true) {
             // Already hunting for this track. One left over from a track the
             // queue has moved past is a different matter: it can only come
@@ -5220,13 +5383,20 @@ class PlaybackService : MediaLibraryService() {
             // the cached-track path, was refused by it for being pending, and
             // lost its upgrade until the next progress sample came round.
             if (!QualityUpgrade.isPending(mediaId) &&
-                (uri == null || !adoptUnresolvedTrack(mediaId, uri, playingSeconds))
+                (uri == null || !adoptUnresolvedTrack(mediaId, uri, playingSeconds, byHand))
             ) {
+                if (byHand) announce(getString(R.string.upgrade_quality_none_found))
                 return@launch
             }
             val better = withContext(Dispatchers.IO) {
                 QualityUpgrade.lookAgain(mediaId, playingSeconds)
-            } ?: return@launch
+            } ?: run {
+                // The search finished and nothing in it was worth the seam.
+                // Said out loud, because "Upgrade quality" that finds nothing
+                // and says nothing is the same as a button that is broken.
+                if (byHand) announce(getString(R.string.upgrade_quality_none_found))
+                return@launch
+            }
             try {
                 swapIn(mediaId, better)
             } finally {
@@ -5269,19 +5439,24 @@ class PlaybackService : MediaLibraryService() {
      * served the copy that was found rather than the one being replaced. The
      * listener hears one cut, for the change they asked for.
      */
-    private fun upgradeQualityNow() {
-        val player = player ?: return
-        if (offlineBlocksUpgrades()) return
-        val mediaId = player.currentMediaItem?.mediaId ?: return
-        // Do not charge the manual cooldown for a command that merely arrived
-        // while this track's automatic or manual upgrade was already running.
-        // The UI disables the row too, but the service is the authoritative
-        // boundary for controllers which do not use that UI.
+    private fun upgradeQualityNow(): UpgradeOutcome {
+        val player = player ?: return UpgradeOutcome.STARTED
+        if (offlineBlocksUpgrades()) return UpgradeOutcome.OFFLINE
+        val mediaId = player.currentMediaItem?.mediaId ?: return UpgradeOutcome.STARTED
+        // An upgrade already running for this track is not refused. The
+        // listener's request makes the answer explicit, and the search that is
+        // already running weighs its candidates by that rule when it gets to
+        // them — so the tap joins the search rather than being thrown away.
+        //
+        // The cooldown is not charged for it either: this command did not ask
+        // for a second search, it asked for the one in flight to be judged by
+        // the listener's rules.
         if (mediaId in NerdStats.racingLossless.value ||
             (upgradeJob?.isActive == true && upgradeFor == mediaId)
         ) {
-            TrackLog.d("BitChord", "manual upgrade ignored for $mediaId: upgrade already running", about = mediaId)
-            return
+            QualityUpgrade.askByHand(mediaId)
+            TrackLog.d("BitChord", "manual upgrade joined the running one for $mediaId", about = mediaId)
+            return UpgradeOutcome.STARTED
         }
         val remaining = manualUpgradeThrottle.tryAcquire(SystemClock.elapsedRealtime())
         if (remaining > 0) {
@@ -5290,7 +5465,7 @@ class PlaybackService : MediaLibraryService() {
                 "manual upgrade ignored for $mediaId: ${remaining}ms cooldown remaining",
                 about = mediaId,
             )
-            return
+            return UpgradeOutcome.COOLDOWN
         }
         OriginalVersion.unpin(mediaId)
         // A manual retry is a request for the addon's state *now*. In
@@ -5302,6 +5477,20 @@ class PlaybackService : MediaLibraryService() {
         QualityUpgrade.askByHand(mediaId)
         TrackLog.d("BitChord", "upgrade asked for by hand for $mediaId", about = mediaId)
         lookForBetterCopy(player, byHand = true)
+        return UpgradeOutcome.STARTED
+    }
+
+    /**
+     * Says something about an upgrade the listener asked for.
+     *
+     * A button that does nothing is a button that feels broken, and this one
+     * did nothing for three separate reasons that were all invisible: the
+     * search was refused, it found nothing, or the copy it found was turned
+     * down by a rule the listener had never heard of. The answer is now said
+     * out loud, in the player's own voice.
+     */
+    private fun announce(message: String) {
+        Toast.makeText(applicationContext, message, Toast.LENGTH_SHORT).show()
     }
 
     /**
@@ -5333,28 +5522,48 @@ class PlaybackService : MediaLibraryService() {
      *   caller — needed here to turn the size of the cache entry into a
      *   bitrate. See [cachedFloor].
      */
-    private suspend fun adoptUnresolvedTrack(mediaId: String, uri: Uri, durationSec: Int?): Boolean {
+    private suspend fun adoptUnresolvedTrack(
+        mediaId: String,
+        uri: Uri,
+        durationSec: Int?,
+        byHand: Boolean = false,
+    ): Boolean {
         val format = withContext(Dispatchers.Main) {
             player
                 ?.takeIf { it.currentMediaItem?.mediaId == mediaId && audioFormatFor == mediaId }
                 ?.audioFormat
         } ?: return false
-        val mime = format.sampleMimeType ?: return false
+        val mime = format.sampleMimeType
+        // The decoder has not said what these bytes are yet. An automatic
+        // upgrade waits for the next progress sample, which will know. A
+        // hand-asked one does not: the listener asked, and an undecided
+        // decoder is not a reason to say nothing happened.
+        if (mime == null && !byHand) return false
         // The file the listener saved, playing as itself. This is the track
         // every other part of the app already believes is on disk — and now
         // the one that actually is.
         if (uri.scheme == "file" || uri.scheme == "content") {
-            return adoptFileBackedTrack(mediaId, uri, format, durationSec)
+            return adoptFileBackedTrack(mediaId, uri, format, durationSec, byHand)
         }
-        val videoId = uri.getQueryParameter("v") ?: return false
-        val downloaded = com.music.bitchord.download.Downloads.savedUri(this, videoId) != null
+        // A source-backed track carries no `v`: its identity is
+        // `src:<config>::<track>`, spelled out in [mediaIdIn], and the URI it
+        // plays from is the one the source handed over. Refusing it here is
+        // what made "Upgrade quality" do nothing on every track an extension
+        // was serving — the second look never ran for it, because the only
+        // path that starts one for a track that was never resolved asked for
+        // a video id first.
+        val videoId = uri.getQueryParameter("v")
+        val sourceBacked = uri.authority == "source"
+        if (videoId == null && !sourceBacked) return false
+        val downloaded = videoId != null &&
+            com.music.bitchord.download.Downloads.savedUri(this, videoId) != null
         if (downloaded) return false
         val target = SourceResolver.targetIn(uri)
         val expectedSec = target.durationSec
         if (TrackMatcher.isSevereMismatch(expectedSec, durationSec)) {
             TrackLog.w(
                 "BitChord",
-                "cached rendition duration mismatch: playing ${durationSec}s vs catalogue ${expectedSec}s for $videoId; discarding cache rendition",
+                "cached rendition duration mismatch: playing ${durationSec}s vs catalogue ${expectedSec}s for ${videoId ?: mediaId}; discarding cache rendition",
                 about = mediaId,
             )
             withContext(Dispatchers.IO) { AudioCache.discardRendition(uri) }
@@ -5365,6 +5574,7 @@ class PlaybackService : MediaLibraryService() {
             target = target,
             playingMime = mime,
             playing = withContext(Dispatchers.IO) { cachedFloor(uri, format, durationSec) },
+            explicit = byHand,
         )
     }
 
@@ -5398,22 +5608,33 @@ class PlaybackService : MediaLibraryService() {
         uri: Uri,
         format: Format,
         durationSec: Int?,
+        byHand: Boolean = false,
     ): Boolean {
         if (Downloads.verifiedSavedUri(mediaId) == null) return false
-        // A track that came from an addon is left alone, and not because there
-        // is nothing to look for: its file *is* the copy that source served —
-        // the download resolved through the same ladder, so the local file and
-        // the best copy available were the same thing when it was saved.
+        // A track that came from a source is offered the sources like any
+        // other, and the source it came from is named below.
         //
-        // What it could not do is come back out again. A swap hands the player
-        // a marked rendition of an item it can re-resolve, and for an addon
-        // track that item is `bitchord://source…`, which the resolver answers
-        // by asking the source afresh rather than by handing over the parked
-        // stream ([QualityUpgrade.forcedStream] is keyed on the `v=` that a
-        // YouTube id carries). An "upgrade" there would overwrite a file the
-        // listener has with a fresh stream from the same source at the same
-        // quality, and pay a seam in the audio for it.
-        if (SourceRegistry.parseTrackKey(mediaId) != null) return false
+        // It used to be left alone outright, and the reason it gave was
+        // technical rather than musical: "a swap hands the player a marked
+        // rendition of an item it can re-resolve, and for an addon track that
+        // item is `bitchord://source…`, which the resolver answers by asking
+        // the source afresh rather than by handing over the parked stream
+        // (`QualityUpgrade.forcedStream` is keyed on the `v=` that a YouTube
+        // id carries)".
+        //
+        // That keying was the bug, and it has been fixed: the parked stream is
+        // now looked up by the media id, which a source-backed track spells
+        // out as `src:<config>::<track>` — see [QualityUpgrade.forcedStream].
+        // So the objection no longer holds, and leaving the guard in place
+        // meant that a track downloaded through an extension was never
+        // upgraded at all: the file was on the device, the extension held the
+        // lossless copy, and "upgrade local music" did nothing — which is
+        // exactly the inconsistency it was written to end.
+        //
+        // What the file *is* still counts: the floor the replacement has to
+        // clear is the file's own quality, so the same source answering with
+        // the same tier is refused, and the search costs a seam only when the
+        // answer is genuinely better.
         val song = withContext(Dispatchers.Main) {
             player?.currentMediaItem?.takeIf { it.mediaId == mediaId }?.toSong()
         } ?: return false
@@ -5423,6 +5644,11 @@ class PlaybackService : MediaLibraryService() {
             target = TrackMatcher.targetOf(song),
             playingMime = format.sampleMimeType,
             playing = withContext(Dispatchers.IO) { cachedFloor(uri, format, durationSec) },
+            explicit = byHand,
+            // The source the file was downloaded from. It is the one that may
+            // hold a better tier of this recording, and it is asked again even
+            // when the listener ranked it below YouTube.
+            servedBy = SourceRegistry.parseTrackKey(mediaId)?.first,
         )
     }
 
@@ -5734,6 +5960,9 @@ class PlaybackService : MediaLibraryService() {
             NerdStats.recordSource(mediaId, upgradedSourceName)
             QualityUpgrade.unshelve(mediaId)
             TrackLog.d("BitChord", "upgraded to ${stream.format.summary} at ${upgradedAt}ms ($upgradedSourceName)")
+            if (QualityUpgrade.isHandAsked(mediaId)) {
+                announce(getString(R.string.upgrade_quality_found, stream.format.summary))
+            }
             // The position the swap actually landed at, not the one it started
             // from: a crossfade spends seconds preparing, and a revert (or the
             // next swap point) should not jump back over them.
@@ -5912,19 +6141,40 @@ class PlaybackService : MediaLibraryService() {
             }
         }
         val warmedThrough: Long?
+        var lastBeat = 0L
         try {
             warmedThrough = withTimeoutOrNull(UPGRADE_AUDITION_MS) {
                 while (true) {
+                    val elapsed = SystemClock.elapsedRealtime() - startedAt
                     val verdict = withContext(Dispatchers.Main) {
-                        auditionVerdict(audition, at.duration, stream, meter.bytes.get())
+                        auditionVerdict(audition, at, stream, meter.bytes.get(), elapsed)
                     }
                     when (verdict) {
-                        is Audition.Ready -> return@withTimeoutOrNull verdict.bufferedTo
+                        is Audition.Ready -> {
+                            TrackLog.d("BitChord", "upgrade proved: ${verdict.why}")
+                            return@withTimeoutOrNull verdict.bufferedTo
+                        }
                         is Audition.Rejected -> {
                             TrackLog.w("BitChord", "upgrade dropped before it was heard: ${verdict.why}")
                             return@withTimeoutOrNull null
                         }
-                        Audition.Waiting -> delay(UPGRADE_PROVE_STEP_MS)
+                        is Audition.Waiting -> {
+                            // A heartbeat, once a second, saying what the
+                            // audition is doing. The silence this replaces
+                            // was the reason the last two attempts at this
+                            // bug ended in "never proved itself" with
+                            // nothing to act on: the wait had no state and
+                            // the timeout named no number.
+                            if (elapsed - lastBeat >= UPGRADE_BEAT_MS) {
+                                lastBeat = elapsed
+                                TrackLog.d(
+                                    "BitChord",
+                                    "upgrade waiting: ${verdict.why}",
+                                    about = mediaId,
+                                )
+                            }
+                            delay(UPGRADE_PROVE_STEP_MS)
+                        }
                     }
                 }
                 @Suppress("UNREACHABLE_CODE") null
@@ -5975,10 +6225,19 @@ class PlaybackService : MediaLibraryService() {
 
     /** How an audition in progress is coming along — see [auditionUpgrade]. */
     private sealed interface Audition {
-        data object Waiting : Audition
+        /**
+         * Not yet, and [why] says what is still missing.
+         *
+         * The reason this carries a line at all: the proof used to be a
+         * single question with a single answer, and a stream that could not
+         * satisfy it sat in silence for the whole window and then reported
+         * "never proved itself" — which names neither the state it reached
+         * nor the number it was stuck on. Every wait now says both.
+         */
+        class Waiting(val why: String) : Audition
 
         /** Good, and buffered through this position in the track. */
-        class Ready(val bufferedTo: Long) : Audition
+        class Ready(val bufferedTo: Long, val why: String) : Audition
 
         class Rejected(val why: String) : Audition
     }
@@ -5991,12 +6250,29 @@ class PlaybackService : MediaLibraryService() {
      * Main thread. Everything that has to be true before the audio is cut,
      * asked of the audition player rather than of the catalogue that made the
      * claims.
+     *
+     * The proof is deliberately a set of independent ways to be right rather
+     * than one arithmetic condition. It used to be one: "the buffered
+     * position has reached twelve seconds past the listener *and* a megabyte
+     * has been loaded". Both halves are right for a progressive file and both
+     * are wrong for a manifest, and a manifest is what a Dolby Atmos addon
+     * hands over:
+     *
+     *  - Its length is a few kilobytes, so the megabyte is never loaded and
+     *    the wait runs out with nothing said about why.
+     *  - Its audio arrives in segments under their own cache keys, so the
+     *    "loaded bytes" the player counted are the segments, not the file.
+     *
+     * The result was a Dolby Atmos upgrade found, fetched, decoded, buffered
+     * and then thrown away — the one thing the listener asked for, discarded
+     * for a number that describes a FLAC and not a DASH index.
      */
     private fun auditionVerdict(
         audition: ExoPlayer,
-        previousDuration: Long,
+        at: SwapPoint,
         stream: SourceStream,
         bytesLoaded: Long,
+        elapsedMs: Long,
     ): Audition {
         audition.playerError?.let {
             return Audition.Rejected("${it.errorCodeName} opening ${stream.format.summary}")
@@ -6009,50 +6285,89 @@ class PlaybackService : MediaLibraryService() {
         if (audition.playbackState == Player.STATE_ENDED) {
             return Audition.Rejected("replacement ended immediately")
         }
-        if (audition.playbackState != Player.STATE_READY) return Audition.Waiting
+        val state = audition.playbackState
         val length = audition.duration
-        if (length <= 0) return Audition.Waiting
-        if (previousDuration > 0 && abs(length - previousDuration) > upgradeLengthSlackMs) {
-            return Audition.Rejected("replacement is ${length}ms against ${previousDuration}ms")
+        val buffered = audition.bufferedPosition
+        val mime = audition.audioFormat?.sampleMimeType
+        val snapshot =
+            "state=$state duration=${length}ms buffered=${buffered}ms " +
+                "bytes=$bytesLoaded elapsed=${elapsedMs}ms mime=$mime"
+
+        if (state != Player.STATE_READY) return Audition.Waiting("not ready yet ($snapshot)")
+
+        // The length, when the source states one. A manifest that states none
+        // — a DASH index without a presentation duration — says nothing about
+        // the track's length, and silence is not evidence that it came up
+        // short. So an unknown length is not a reason to wait, and not a
+        // reason to refuse: the swap's own check catches a short replacement
+        // where the length is known (see [watchUpgrade]).
+        if (length > 0 && at.duration > 0 && abs(length - at.duration) > upgradeLengthSlackMs) {
+            return Audition.Rejected("replacement is ${length}ms against ${at.duration}ms")
         }
         // What the decoder was actually configured with, against what the
         // source said it was sending. The one failure mode a claim cannot
         // catch, because the claim is the thing that is wrong: a catalogue
         // advertising FLAC and serving a transcode buys a break in the audio
         // for no gain whatsoever.
-        val mime = audition.audioFormat?.sampleMimeType
         if (mime != null && stream.format.isLossless == true && !NerdStats.isLosslessMime(mime)) {
             return Audition.Rejected("promised ${stream.format.summary}, decoder was handed $mime")
         }
-        val buffered = audition.bufferedPosition
-        // Aimed at where the listener will be, not where they were when this
-        // started: the audition buffers ahead of a track that is still playing,
-        // so the window it has to cover keeps moving. On any connection worth
-        // upgrading over, buffering outruns playback and this converges in a
-        // couple of seconds; on one where it doesn't, the swap would have
-        // stalled anyway and the timeout is the right answer.
-        val wantedThrough = (player?.currentPosition ?: 0L) + UPGRADE_PREBUFFER_MS
-        // The only reason to settle for less: there is no more track to buffer.
-        //
-        // `isLoading` was tried here as a second escape — "the loader has
-        // stopped of its own accord, so this is as good as it gets" — and it
-        // was wrong every single time. [ChunkedDataSource] closes and reopens
-        // the upstream every two megabytes, and `isLoading` goes false in the
-        // gap between one range finishing and the next being asked for. A poll
-        // landing in that gap read it as a full buffer, so every upgrade was
-        // declared ready with roughly one chunk in hand and the swap then
-        // landed seconds past the end of it, back on the network:
-        //
-        // ```
-        //   upgrade to FLAC proved in 8701ms, buffered through 32496ms
-        //   upgrade landing at 39889ms, past the 32496ms warmed for it
-        // ```
-        if (buffered >= wantedThrough || audition.bufferedPercentage >= 100) {
-            // Measured: "buffered through 23466ms" with 2.7kB actually cached, and the swap then looped.
-            if (bytesLoaded < MIN_PROVEN_LOAD_BYTES) return Audition.Waiting
-            return Audition.Ready(buffered)
+
+        // Where the listener will be when the swap lands, and how much of the
+        // replacement has to reach that point for the cut to be silent.
+        val now = player?.currentPosition ?: 0L
+        // The floor: some audio past where the audition started, or the
+        // stream has not been shown to play at all.
+        val floor = at.position + MIN_PROVEN_BUFFER_MS
+        // The cover: enough to reach the listener's own position, so the swap
+        // lands inside the region that was warmed rather than past it.
+        val mustCover = now + MIN_SWAP_COVER_MS
+        // The aim: the window that makes the swap inaudible.
+        val wantedThrough = now + UPGRADE_PREBUFFER_MS
+
+        if (buffered < floor) return Audition.Waiting("no audio past the cut yet ($snapshot)")
+        if (buffered < mustCover) {
+            return Audition.Waiting("buffered to ${buffered}ms, short of the listener at ${now}ms ($snapshot)")
         }
-        return Audition.Waiting
+
+        // A manifest is fetched in pieces: the index, then a segment at a
+        // time, each under its own cache key. The megabyte the progressive
+        // proof insists on is a *file's* opening, and a manifest has none —
+        // so there the buffered position is the proof, because it was made
+        // out of the segments themselves.
+        val manifest = StreamContainer.manifestMimeOf(stream.url) != null
+
+        // The full proof: the whole window, warmed, with the bytes to back it.
+        if (buffered >= wantedThrough && bytesLoaded >= MIN_PROVEN_LOAD_BYTES) {
+            return Audition.Ready(buffered, "buffered through ${buffered}ms with ${bytesLoaded} bytes ($snapshot)")
+        }
+        // The manifest proof: the window, warmed, from a source that has no
+        // single file behind it.
+        if (manifest && buffered >= wantedThrough && bytesLoaded > 0L) {
+            return Audition.Ready(buffered, "manifest buffered through ${buffered}ms ($snapshot)")
+        }
+        // The whole-track proof: there is no more track to buffer, so the
+        // window can never be filled and waiting for it would time out on a
+        // stream that is already whole.
+        if (audition.bufferedPercentage >= 100 && bytesLoaded > 0L) {
+            return Audition.Ready(buffered, "the whole replacement is buffered ($snapshot)")
+        }
+        // The cover proof: the bytes are on disk and they reach the listener,
+        // even though the window is not full yet. The swap lands inside the
+        // warmed region, which is what the window was for.
+        if (bytesLoaded >= MIN_PROVEN_LOAD_BYTES) {
+            return Audition.Ready(buffered, "covered the listener with ${bytesLoaded} bytes ($snapshot)")
+        }
+        // The late proof: not a megabyte, but enough of one to play from, and
+        // the window has had long enough to be measured. This is the case the
+        // old single condition could not express — a Dolby Atmos stream at
+        // half a megabit a second reaches the listener's position long before
+        // it reaches a megabyte — and it is the case that used to end in
+        // "never proved itself".
+        if (elapsedMs >= UPGRADE_FALLBACK_MS && bytesLoaded >= MIN_FALLBACK_PROVEN_BYTES) {
+            return Audition.Ready(buffered, "settled after ${elapsedMs}ms with ${bytesLoaded} bytes ($snapshot)")
+        }
+        return Audition.Waiting("not enough yet ($snapshot)")
     }
 
     /**
@@ -6114,12 +6429,19 @@ class PlaybackService : MediaLibraryService() {
     ) {
         if (previousDuration <= 0) return
         scope.launch(TrackLog.about(mediaId)) {
+            // A replacement that states no length at all — a DASH index
+            // without a presentation duration — cannot be shown to be short,
+            // and a check that reverts on what it cannot measure throws away
+            // the upgrade it was meant to protect. Remembered here so the
+            // ceiling can tell "disagreed" from "said nothing".
+            var lengthUnknown = false
             val agreed = withTimeoutOrNull(UPGRADE_PROVE_MS) {
                 while (true) {
                     val current = player?.takeIf { it.currentMediaItem?.mediaId == mediaId }
                         ?: return@withTimeoutOrNull false
                     val now = current.duration
                     if (now > 0) return@withTimeoutOrNull abs(now - previousDuration) <= upgradeLengthSlackMs
+                    lengthUnknown = true
                     // The failure this whole check exists for, caught when it
                     // happens rather than at the ceiling: a replacement that
                     // came up short does not raise an error, it reaches the
@@ -6132,6 +6454,14 @@ class PlaybackService : MediaLibraryService() {
                 @Suppress("UNREACHABLE_CODE") false
             }
             if (agreed == true) return@launch
+            if (agreed == null && lengthUnknown) {
+                TrackLog.d(
+                    "BitChord",
+                    "upgrade for $mediaId kept: its source states no length to check against",
+                    about = mediaId,
+                )
+                return@launch
+            }
             val player = player ?: return@launch
             val item = player.currentMediaItem ?: return@launch
             if (item.mediaId != mediaId) return@launch
@@ -6227,6 +6557,9 @@ class PlaybackService : MediaLibraryService() {
      * break in the audio, in exchange for the listener hearing something now
      * rather than waiting in silence for the good copy.
      */
+    /** Prefix of a queue id that exists only in Spotify's catalogue. */
+    private val SPOTIFY_ROW_PREFIX = com.music.bitchord.data.spotify.SpotifyHomeSource.SPOTIFY_KEY_PREFIX
+
     private suspend fun resolveWithModulePriority(
         videoId: String,
         target: TrackMatcher.Target,
@@ -9568,7 +9901,15 @@ class PlaybackService : MediaLibraryService() {
                 ACTION_SWAP_TO_VERSION -> swapCurrentToVersion(args)
                 ACTION_BEGIN_RADIO_QUEUE -> beginRadioQueue()
                 ACTION_COMMIT_RADIO_QUEUE -> player?.let(::saveQueueSnapshotImmediately)
-                ACTION_UPGRADE_QUALITY -> upgradeQualityNow()
+                ACTION_UPGRADE_QUALITY -> {
+                    val outcome = upgradeQualityNow()
+                    return Futures.immediateFuture(
+                        SessionResult(
+                            SessionResult.RESULT_SUCCESS,
+                            Bundle().apply { putString(EXTRA_UPGRADE_OUTCOME, outcome.wire) },
+                        ),
+                    )
+                }
                 ACTION_SWAP_VERSION -> {
                     val bundle = args.getBundle(EXTRA_SWAP_MEDIA_ITEM)
                     if (bundle != null) {
@@ -10802,6 +11143,57 @@ class PlaybackService : MediaLibraryService() {
 
         /** Loaded media bytes an audition needs before its buffered position is believed. */
         const val MIN_PROVEN_LOAD_BYTES = UPGRADE_HEADER_BYTES
+
+        /**
+         * How much audio past the audition's own starting point has to be
+         * buffered before the replacement counts as playable at all.
+         *
+         * Two seconds: enough to say the stream decodes and carries audio,
+         * and small enough that a manifest's first segment — which can be
+         * several seconds long on its own — is not held up waiting for a
+         * second one.
+         */
+        const val MIN_PROVEN_BUFFER_MS = 2_000L
+
+        /**
+         * How far past the listener the replacement has to reach before the
+         * swap is allowed to land.
+         *
+         * The window the swap aims for is [UPGRADE_PREBUFFER_MS], but a
+         * connection that cannot fill it is a connection on which the swap
+         * would have stalled anyway. What it must never do is land *behind*
+         * the buffered region: the cut then falls on bytes nobody has, and
+         * the track restarts on the network. Two seconds of cover is the
+         * margin that keeps the landing inside what was warmed.
+         */
+        const val MIN_SWAP_COVER_MS = 2_000L
+
+        /**
+         * The bytes a slow replacement is allowed to be accepted on once the
+         * window has had long enough to be measured.
+         *
+         * A quarter of a megabyte is a few seconds of anything: enough to
+         * open on and to cross the cut on. It is the floor for the late
+         * proof, which exists for the streams the megabyte rule describes
+         * badly — a Dolby Atmos rendition at half a megabit a second reaches
+         * the listener long before it reaches a megabyte.
+         */
+        const val MIN_FALLBACK_PROVEN_BYTES = 256L * 1024L
+
+        /**
+         * How long the audition waits for the full window before the late
+         * proof is allowed to fire.
+         *
+         * Half the [UPGRADE_AUDITION_MS] ceiling: long enough that a slow
+         * but healthy stream gets its window, short enough that the ceiling
+         * is not the thing that decides. What fires at the ceiling without
+         * this is "never proved itself", which is how a working Dolby Atmos
+         * upgrade ended up in the bin.
+         */
+        const val UPGRADE_FALLBACK_MS = 12_000L
+
+        /** How often the audition says what it is waiting for. */
+        const val UPGRADE_BEAT_MS = 1_000L
 
         /**
          * Opening fetched after an upgrade so the track stays analysable. Four

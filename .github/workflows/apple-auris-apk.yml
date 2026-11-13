@@ -75,7 +75,7 @@ jobs:
             echo "== $apk"
             "$bt/aapt2" dump badging "$apk" | grep -E "^package:" | head -1
             "$bt/aapt2" dump badging "$apk" | grep -q "package: name='com.dev.bitchord'"
-            "$bt/aapt2" dump badging "$apk" | grep -q "versionCode='122'"
+            "$bt/aapt2" dump badging "$apk" | grep -q "versionCode='135'"
             "$bt/apksigner" verify --print-certs "$apk" | grep -i "sha-256" | head -1
           done
 

@@ -77,6 +77,7 @@ object SettingsCatalog {
             "audio.loudness_normalization",
             "audio.loudness_off_on_speaker",
             "audio.seamless_quality_upgrades",
+            "audio.auto_upgrade_local_storage",
             "audio.equalizer",
             "audio.jamesdsp",
         ),
@@ -169,6 +170,7 @@ object SettingsCatalog {
         ),
         SettingsCategory.ADVANCED to listOf(
             "advanced.nerd_stats",
+            "advanced.replay_onboarding",
         ),
         SettingsCategory.SUPPORT to listOf(
             "support.donate",

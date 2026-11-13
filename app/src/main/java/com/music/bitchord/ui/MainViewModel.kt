@@ -16,9 +16,13 @@ import com.music.bitchord.data.LocalMediaRepository
 import com.music.bitchord.data.LikeState
 import com.music.bitchord.data.presence.AndroidPresence
 import com.music.bitchord.data.YtMusicRepository
-import com.music.bitchord.data.model.SPOTIFY_MISSING_PREFIX
+import com.music.bitchord.data.model.isUnresolvedSpotify
 import com.music.bitchord.data.model.SPOTIFY_PENDING_PREFIX
+import com.music.bitchord.data.spotify.SPOTIFY_ALBUM_PREFIX
+import com.music.bitchord.data.spotify.SPOTIFY_ARTIST_PREFIX
+import com.music.bitchord.data.spotify.SPOTIFY_CATEGORY_PREFIX
 import com.music.bitchord.data.spotify.SPOTIFY_PAGE_PREFIX
+import com.music.bitchord.data.spotify.SpotifyPages
 import com.music.bitchord.data.spotify.SpotifyImporter
 import com.music.bitchord.data.spotify.SpotifyLibrary
 import com.music.bitchord.data.spotify.SpotifyTrack
@@ -41,6 +45,7 @@ import com.music.bitchord.data.model.AccountChannel
 import com.music.bitchord.data.model.BrowseType
 import com.music.bitchord.data.model.BrowseItem
 import com.music.bitchord.data.model.DetailPage
+import com.music.bitchord.data.model.HomeHeader
 import com.music.bitchord.data.model.HomeShelf
 import com.music.bitchord.data.model.isQuickPicksShelfTitle
 import com.music.bitchord.data.model.withQuickPicks
@@ -121,7 +126,25 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 /** What the Search tab searches: YouTube Music, or the Local Music folder on this device. */
-enum class SearchSource { YOUTUBE, LIBRARY }
+/** How many tracks one Spotify expansion asks for. */
+private const val FLOW_EXPANSION = 8
+
+/**
+ * Where the Search tab looks.
+ *
+ * Three catalogues, three sets of answers. The order is the order the
+ * segmented control draws them in, and it is read by `ordinal` there.
+ */
+enum class SearchSource {
+    /** YouTube Music's own search. */
+    YOUTUBE,
+
+    /** Spotify's own catalogue, read through the web player's backend. */
+    SPOTIFY,
+
+    /** The Local Music folder on this device. */
+    LIBRARY,
+}
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -152,6 +175,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * of being painted over the top of it.
      */
     private val _homeRaw = MutableStateFlow<List<HomeShelf>>(emptyList())
+
+    /**
+     * What the page says above its shelves: a greeting, a grid of shortcuts,
+     * and the chips it can be narrowed by.
+     *
+     * Null for a provider whose home is nothing but shelves — YouTube's has
+     * never had a header, and this is not a change to it. Spotify's home has
+     * all three, because Spotify's own does.
+     */
+    private val _homeHeader = MutableStateFlow<HomeHeader?>(null)
+    val homeHeader: StateFlow<HomeHeader?> = _homeHeader.asStateFlow()
+
+    /**
+     * The chip the Spotify home is narrowed by.
+     *
+     * Kept here rather than in the screen, because the chip is part of the
+     * *request*: Spotify's feed is asked for again with the chip in force,
+     * and the answer replaces the page rather than filtering it.
+     */
+    private val homeFacet = MutableStateFlow("")
 
     /**
      * The quick-picks row's own songs, kept whether the row is on the page
@@ -545,9 +588,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * up for the moment the narrower one takes rather than blanking the page
      * to a spinner.
      */
+    /**
+     * The job that is filling a Spotify page.
+     *
+     * Kept so that opening the same page again does not start a second
+     * matching pass over the same rows, and so the job can be cancelled with
+     * the page. Nothing waits on it: the rows it produces upgrade the page in
+     * place, and a row that has not been matched yet is queued as its own
+     * Spotify catalogue entry and resolved when it plays — see
+     * [com.music.bitchord.data.model.asSpotifyQueueRow].
+     */
+    private val spotifyPageJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
+
     private data class SearchCacheEntry(
         val rows: List<SearchResult>,
         val continuation: String?,
+        /** Spotify's next page is an offset; YouTube Music's is a token. */
+        val nextOffset: Int? = null,
     )
 
     private data class SearchSession(
@@ -555,6 +612,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val requestId: Long,
         val filter: SearchFilter,
         val continuation: String?,
+        val nextOffset: Int? = null,
+        val source: SearchSource = SearchSource.YOUTUBE,
+        val query: String = "",
     )
 
     private val searchCache = LruCache<String, SearchCacheEntry>(SEARCH_CACHE_ENTRIES)
@@ -1855,6 +1915,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     init {
+        // A Spotify session opens on Spotify's catalogue. The listener chose
+        // that provider, and the search tab answering from another catalogue
+        // is a surprise; the switcher is still there to pick another.
+        if (AppSettings.homeProvider.value == HomeProvider.SPOTIFY) {
+            _searchSource.value = SearchSource.SPOTIFY
+        }
         startSearchPipeline()
         startSuggestPipeline()
         startTypeaheadMediaPipeline()
@@ -2293,6 +2359,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _homeShelfTitles.value = emptyList()
         _homeQuickPicksItems.value = emptyList()
         _homeRaw.value = emptyList()
+        // The header is *kept* while the page reloads. The chips in it are the
+        // way back to the whole feed: a page that hid them while it loaded —
+        // and again when the load failed — left a listener who had narrowed the
+        // page stuck in the narrowed page. Only a change of provider clears
+        // it, because only then is it another provider's header.
+        if (AppSettings.homeProvider.value != HomeProvider.SPOTIFY) {
+            _homeHeader.value = null
+        }
         _homeLoadingMore.value = false
         _homeRecentlyPlayedLoading.value = _signedIn.value
         // The core feed plus one browse per supplement. Recently played is left
@@ -2372,26 +2446,50 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun loadSpotifyHome(identity: String?, generation: Long) {
         homeContinuation = null
+        val facet = homeFacet.value
         viewModelScope.launch {
-            val shelves = runCatching { SpotifyHomeSource.shelves() }.getOrDefault(emptyList())
+            val outcome = runCatching { SpotifyHomeSource.page(facet) }.getOrNull()
             if (!isCurrentHomeLoad(identity, generation)) return@launch
-            if (shelves.isEmpty()) {
-                // An error the listener can act on beats a blank page, and the
-                // likeliest cause is a token that could not be minted rather than
-                // an empty catalogue — see the provider's row logging.
-                _home.value = UiState.Error("Spotify returned nothing to show")
+            if (outcome == null || outcome.isEmpty) {
+                // The provider's own words for it. An empty Spotify home has
+                // several unrelated causes — no token, a refused endpoint, a
+                // feed read and found to hold no cards — and they need opposite
+                // fixes, so the message names the one that happened instead of
+                // saying "nothing to show" to all of them.
+                _home.value = UiState.Error(outcome?.reason ?: "Spotify returned nothing to show")
                 return@launch
             }
-            publishHomeShelves(shelves)
+            _homeHeader.value = outcome.header
+            publishHomeShelves(outcome.shelves)
         }
+    }
+
+    /**
+     * The chip the listener picked.
+     *
+     * Spotify's feed is asked for again with the chip in force and the answer
+     * replaces the page: the chip is not a filter over the shelves already
+     * drawn, it is a different question to Spotify.
+     *
+     * Picking the chip that is already in force does nothing. The way back to
+     * the whole page is the close button beside the chip, which is where
+     * Spotify puts it — a chip that undid itself on a second tap would make
+     * the row a toggle nobody could read the state of.
+     */
+    fun selectHomeChip(chip: String) {
+        if (AppSettings.homeProvider.value != HomeProvider.SPOTIFY) return
+        if (homeFacet.value == chip) return
+        homeFacet.value = chip
+        loadHome()
     }
 
     /** [refreshHome]'s Spotify half: the rows, read again rather than carried on. */
     private suspend fun refreshSpotifyHome(identity: String?) {
-        val shelves = runCatching { SpotifyHomeSource.shelves() }.getOrDefault(emptyList())
-        if (identity != listenerKey() || shelves.isEmpty()) return
+        val outcome = runCatching { SpotifyHomeSource.page(homeFacet.value) }.getOrNull() ?: return
+        if (identity != listenerKey() || outcome.isEmpty) return
         homeSeenTitles.clear()
-        _homeRaw.value = shelves
+        _homeHeader.value = outcome.header
+        _homeRaw.value = outcome.shelves
         publishHome()
     }
 
@@ -2770,6 +2868,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // The Library source answers from the device on every keystroke (see
         // [libraryResults]); YouTube's completions have nothing to add to it.
         if (_searchSource.value == SearchSource.LIBRARY) return
+        // Spotify's own completions are a different operation from YouTube
+        // Music's, and YouTube Music's completions under a Spotify search
+        // are answers from the wrong catalogue.
+        if (_searchSource.value == SearchSource.SPOTIFY) return
         // While typing, surface text completions — the pipeline already feeds
         // them through [suggestRequests] and publishes results via typeahead.
         suggestRequests.tryEmit(newValue)
@@ -2804,6 +2906,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         when (source) {
             SearchSource.LIBRARY -> loadLibrarySongs()
             SearchSource.YOUTUBE -> submitSearch()
+            SearchSource.SPOTIFY -> {
+                // Spotify has no videos tab, and a filter the request does
+                // not honour is a filter that lies: the pill says one thing
+                // and the list answers another.
+                if (_filter.value == SearchFilter.VIDEOS) _filter.value = SearchFilter.ALL
+                submitSearch()
+            }
         }
     }
 
@@ -2846,17 +2955,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private data class SearchRequest(
         val query: String,
         val filter: SearchFilter,
+        val source: SearchSource,
         val requestId: Long,
     )
 
-    private fun cacheKey(query: String, filter: SearchFilter) = "${filter.name}:$query"
+    /**
+     * The cache key of one answer.
+     *
+     * The source is in the key: Spotify's answer and YouTube Music's answer
+     * to the same words are different answers, and one of them must never be
+     * shown for the other.
+     */
+    private fun cacheKey(query: String, filter: SearchFilter, source: SearchSource) =
+        "${source.name}:${filter.name}:$query"
 
     /**
      * The results of the longest earlier query this one starts with — near
      * enough to leave up while the narrower search runs.
      */
-    private fun prefixMatch(query: String, filter: SearchFilter): List<SearchResult>? {
-        val prefix = "${filter.name}:"
+    private fun prefixMatch(query: String, filter: SearchFilter, source: SearchSource): List<SearchResult>? {
+        val prefix = "${source.name}:${filter.name}:"
         return searchCache.snapshot()
             .filterKeys { it.startsWith(prefix) && query.startsWith(it.removePrefix(prefix), true) }
             .maxByOrNull { it.key.length }
@@ -2879,7 +2997,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _searchScrollReset.value += 1
         searchSession = null
         _searchLoadingMore.value = false
-        searchRequests.tryEmit(SearchRequest(query, _filter.value, id))
+        searchRequests.tryEmit(SearchRequest(query, _filter.value, _searchSource.value, id))
     }
 
     /**
@@ -2904,16 +3022,70 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun startSearchPipeline() = viewModelScope.launch {
         searchRequests
             .collectLatest { request ->
-                val key = cacheKey(request.query, request.filter)
+                val key = cacheKey(request.query, request.filter, request.source)
                 // Something to look at immediately: the exact answer if this
                 // query has been run before, otherwise the closest earlier
                 // one. Only fall back to a spinner with neither.
                 val exact = searchCache.get(key)
-                val cached = exact?.rows ?: prefixMatch(request.query, request.filter)
+                val cached = exact?.rows ?: prefixMatch(request.query, request.filter, request.source)
                 _results.value = cached?.let { UiState.Success(it.withoutBlockedArtists()) }
                     ?: UiState.Loading
                 if (exact != null) {
-                    searchSession = SearchSession(key, request.requestId, request.filter, exact.continuation)
+                    searchSession = SearchSession(
+                        key = key,
+                        requestId = request.requestId,
+                        filter = request.filter,
+                        continuation = exact.continuation,
+                        nextOffset = exact.nextOffset,
+                        source = request.source,
+                        query = request.query,
+                    )
+                    return@collectLatest
+                }
+
+                // Spotify has its own catalogue and its own backend. The
+                // search is asked there, and the rows it answers with are
+                // this app's rows: Spotify's collections open their own
+                // pages, and Spotify's tracks are matched to something that
+                // can play before they are drawn.
+                if (request.source == SearchSource.SPOTIFY) {
+                    val page = runCatching {
+                        com.music.bitchord.data.spotify.SpotifySearch.searchPage(
+                            request.query,
+                            request.filter,
+                        )
+                    }
+                    if (request.requestId != newestRequestId.get()) return@collectLatest
+                    _results.value = page.fold(
+                        onSuccess = { spotify ->
+                            // The rows are published the usual way, and a
+                            // page that comes back empty — or whose every row
+                            // is filtered out — says what the answer actually
+                            // contained. "No results" on its own is three
+                            // different faults wearing one sentence: the
+                            // catalogue had nothing, the answer was in a shape
+                            // this build cannot read, or Spotify's tracks
+                            // matched nothing playable.
+                            val published = publishedRows(
+                                rows = spotify.rows,
+                                continuation = null,
+                                nextOffset = spotify.nextOffset,
+                                key = key,
+                                requestId = request.requestId,
+                                filter = request.filter,
+                                source = request.source,
+                            )
+                            if (published is UiState.Success) {
+                                published
+                            } else {
+                                UiState.Error(
+                                    "Spotify found nothing for \"" + request.query +
+                                        "\" — " + spotify.diagnostic,
+                                )
+                            }
+                        },
+                        onFailure = { failure -> UiState.Error(failure.friendly()) },
+                    )
                     return@collectLatest
                 }
 
@@ -2945,7 +3117,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 // whether it succeeded or failed.
                 if (request.requestId != newestRequestId.get()) return@collectLatest
                 _results.value = result.fold(
-                    onSuccess = { page -> published(page, key, request.requestId) },
+                    onSuccess = { page ->
+                        published(page, key, request.requestId, request.filter, request.source)
+                    },
                     onFailure = { failure -> UiState.Error(failure.friendly()) },
                 )
             }
@@ -2958,8 +3132,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun loadMoreSearchResults() {
         val session = searchSession ?: return
-        val token = session.continuation ?: return
         if (_searchLoadingMore.value) return
+        if (session.source == SearchSource.SPOTIFY) {
+            loadMoreSpotifyResults(session)
+            return
+        }
+        val token = session.continuation ?: return
         _searchLoadingMore.value = true
         viewModelScope.launch {
             val next = YtMusicRepository.searchContinuation(token, session.filter)
@@ -2971,6 +3149,40 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         .withoutBlockedArtists()
                     searchCache.put(session.key, SearchCacheEntry(merged, page.continuation))
                     searchSession = session.copy(continuation = page.continuation)
+                    _results.value = UiState.Success(merged)
+                }
+                _searchLoadingMore.value = false
+            }
+        }
+    }
+
+    /**
+     * The next page of a Spotify search.
+     *
+     * Spotify pages by number rather than by a continuation token, so the
+     * session carries the offset the next page starts at. The rows are
+     * merged the same way YouTube Music's are.
+     */
+    private fun loadMoreSpotifyResults(session: SearchSession) {
+        val offset = session.nextOffset ?: return
+        _searchLoadingMore.value = true
+        viewModelScope.launch {
+            val next = runCatching {
+                com.music.bitchord.data.spotify.SpotifySearch.searchPage(
+                    session.query,
+                    session.filter,
+                    offset,
+                )
+            }
+            val stillCurrent = searchSession == session && session.requestId == newestRequestId.get()
+            if (stillCurrent) {
+                next.onSuccess { page ->
+                    val current = (_results.value as? UiState.Success)?.data.orEmpty()
+                    val merged = (current + page.rows)
+                        .distinctBy(::searchResultKey)
+                        .withoutBlockedArtists()
+                    searchCache.put(session.key, SearchCacheEntry(merged, null, page.nextOffset))
+                    searchSession = session.copy(nextOffset = page.nextOffset)
                     _results.value = UiState.Success(merged)
                 }
                 _searchLoadingMore.value = false
@@ -3058,13 +3270,48 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         page: YtMusicRepository.SearchPage,
         key: String,
         requestId: Long,
+        filter: SearchFilter,
+        source: SearchSource,
+    ): UiState<List<SearchResult>> = publishedRows(
+        rows = page.rows,
+        continuation = page.continuation,
+        nextOffset = null,
+        key = key,
+        requestId = requestId,
+        filter = filter,
+        source = source,
+    )
+
+    /**
+     * Publishes one page of results, and remembers where the next one starts.
+     *
+     * Shared by the two backends: what differs between them is only how the
+     * next page is addressed — a continuation token for YouTube Music, an
+     * offset for Spotify — and how the rows are made.
+     */
+    private fun publishedRows(
+        rows: List<SearchResult>,
+        continuation: String?,
+        nextOffset: Int?,
+        key: String,
+        requestId: Long,
+        filter: SearchFilter,
+        source: SearchSource,
     ): UiState<List<SearchResult>> {
-        val rows = page.rows.withoutBlockedArtists()
-        if (rows.isEmpty()) return UiState.Error(text(R.string.no_results))
-        searchCache.put(key, SearchCacheEntry(rows, page.continuation))
-        searchSession = SearchSession(key, requestId, _filter.value, page.continuation)
-        prefetchTopResult(rows)
-        return UiState.Success(rows)
+        val clean = rows.withoutBlockedArtists()
+        if (clean.isEmpty()) return UiState.Error(text(R.string.no_results))
+        searchCache.put(key, SearchCacheEntry(clean, continuation, nextOffset))
+        searchSession = SearchSession(
+            key = key,
+            requestId = requestId,
+            filter = filter,
+            continuation = continuation,
+            nextOffset = nextOffset,
+            source = source,
+            query = _query.value.trim(),
+        )
+        prefetchTopResult(clean)
+        return UiState.Success(clean)
     }
 
     private fun searchResultKey(row: SearchResult): String = when (row) {
@@ -3307,6 +3554,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         ) return
         if (browseId.startsWith(SPOTIFY_PAGE_PREFIX)) {
             openSpotifyPage(browseId, title, subtitle, thumbnailUrl)
+            return
+        }
+        // An album, an artist or a category from Spotify's home. Each of them
+        // is a card on that page, and a card that opens nothing is a dead end,
+        // so each has a page of its own — read through Spotify's own
+        // operations, the way the web player reads them.
+        if (browseId.startsWith(SPOTIFY_ALBUM_PREFIX) ||
+            browseId.startsWith(SPOTIFY_ARTIST_PREFIX) ||
+            browseId.startsWith(SPOTIFY_CATEGORY_PREFIX)
+        ) {
+            openSpotifyCollection(browseId, title, subtitle, thumbnailUrl)
             return
         }
         val resolved = browseTypeOf(browseId, type)
@@ -3555,9 +3813,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             songs = UiState.Loading,
             type = BrowseType.PLAYLIST,
         )
-        viewModelScope.launch {
+        // The page's own job, kept so that Play can wait for it. A Spotify
+        // page is read in two stages — the tracks arrive, then each one is
+        // matched to something this app can play — and Play pressed between
+        // the two stages used to queue only the rows that had already
+        // matched: eight songs of a daily mix, and nothing after them.
+        val job = viewModelScope.launch {
             val playlistId = browseId.removePrefix(SPOTIFY_PAGE_PREFIX)
-            fun open() = _detailStack.value.any { it.browseId == browseId }
             fun setSongs(songs: UiState<List<Song>>) {
                 _detailStack.value = _detailStack.value.map {
                     if (it.browseId == browseId) it.copy(songs = songs) else it
@@ -3583,28 +3845,29 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 setSongs(UiState.Error(text(R.string.spotify_empty_tracks)))
                 return@launch
             }
-            val gate = Semaphore(SPOTIFY_MATCH_PARALLELISM)
-            coroutineScope {
-                tracks.forEachIndexed { index, track ->
-                    launch {
-                        gate.withPermit {
-                            if (!open()) return@withPermit
-                            val match = runCatching { SpotifyImporter.matchTrack(track) }.getOrNull()
-                            val found = match?.copy(thumbnailUrl = match.thumbnailUrl ?: track.imageUrl)
-                                ?: track.asPendingSong().let {
-                                    it.copy(videoId = SPOTIFY_MISSING_PREFIX + track.id)
-                                }
-                            _detailStack.value = _detailStack.value.map { page ->
-                                val list = (page.songs as? UiState.Success<List<Song>>)?.data
-                                if (page.browseId == browseId && list != null && index < list.size) {
-                                    page.copy(songs = UiState.Success(list.toMutableList().also { it[index] = found }))
-                                } else page
-                            }
-                        }
-                    }
-                }
-            }
+            matchSpotifyTracks(browseId, tracks, ::setSongs)
         }
+        spotifyPageJobs[browseId] = job
+    }
+
+    /**
+     * The songs of a Spotify page that this app can actually play.
+     *
+     * The rows that have been matched keep the id they were matched to. The
+     * rows that have not are left out: they carry no playable id of their
+     * own, and a queue that holds them is a queue that stops early.
+     *
+     * The page's own matching job is *not* waited for. It used to be, and a
+     * Play pressed in the middle of it sat silent for as long as the matcher
+     * took — half a minute on a slow connection — before the first song
+     * started. A row that has not been matched yet is queued as its own
+     * Spotify catalogue entry instead, and the player resolves it by name
+     * when it plays.
+     */
+    fun resolvedSpotifySongs(browseId: String): List<Song> {
+        val list = (_detailStack.value.firstOrNull { it.browseId == browseId }?.songs as? UiState.Success<List<Song>>)
+            ?.data.orEmpty()
+        return list.filterNot { it.isUnresolvedSpotify }
     }
 
     private fun SpotifyTrack.asPendingSong() = Song(
@@ -3617,6 +3880,138 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         },
         albumName = album,
     )
+
+    /**
+     * An album, an artist or a category from Spotify's home.
+     *
+     * The page is pushed with what the card already knew — its title, its
+     * picture — and fills in when Spotify answers: its own name, its own
+     * cover, its tracks and its shelves.
+     *
+     * The tracks are matched to what this app can play the same way a
+     * playlist's are: the rows go up as soon as they are read, marked as
+     * still waiting for their YouTube Music version, and the matches swap in
+     * as they arrive. A page of forty tracks that takes a minute to match is
+     * a page that can be played from while it finishes.
+     */
+    private fun openSpotifyCollection(
+        browseId: String,
+        title: String,
+        subtitle: String,
+        thumbnailUrl: String?,
+    ) {
+        val artist = browseId.startsWith(SPOTIFY_ARTIST_PREFIX)
+        val album = browseId.startsWith(SPOTIFY_ALBUM_PREFIX)
+        _detailStack.value += DetailPage(
+            browseId = browseId,
+            title = title,
+            subtitle = subtitle,
+            thumbnailUrl = thumbnailUrl,
+            songs = UiState.Loading,
+            type = when {
+                artist -> BrowseType.ARTIST
+                album -> BrowseType.ALBUM
+                else -> BrowseType.OTHER
+            },
+        )
+        viewModelScope.launch {
+            fun setSongs(songs: UiState<List<Song>>) {
+                _detailStack.value = _detailStack.value.map {
+                    if (it.browseId == browseId) it.copy(songs = songs) else it
+                }
+            }
+            fun fillIn(page: SpotifyPages.Page) {
+                _detailStack.value = _detailStack.value.map {
+                    if (it.browseId != browseId) return@map it
+                    it.copy(
+                        title = page.title.ifBlank { it.title },
+                        subtitle = page.subtitle.ifBlank { it.subtitle },
+                        thumbnailUrl = page.imageUrl ?: it.thumbnailUrl,
+                        sections = page.shelves,
+                    )
+                }
+            }
+            val page = runCatching {
+                when {
+                    artist -> SpotifyPages.artist(browseId.removePrefix(SPOTIFY_ARTIST_PREFIX))
+                    album -> SpotifyPages.album(browseId.removePrefix(SPOTIFY_ALBUM_PREFIX))
+                    else -> SpotifyPages.category(browseId.removePrefix(SPOTIFY_CATEGORY_PREFIX))
+                }
+            }.getOrElse { error ->
+                // A category has no tracks of its own — it is shelves of
+                // playlists and albums — so an empty track list is not a
+                // failure there. It is only a failure when the page has
+                // nothing at all.
+                setSongs(UiState.Error(error.message ?: text(R.string.failed)))
+                return@launch
+            }
+            fillIn(page)
+            if (page.tracks.isEmpty()) {
+                // Nothing to match, but the shelves are still the page.
+                setSongs(UiState.Success(emptyList()))
+                return@launch
+            }
+            matchSpotifyTracks(browseId, page.tracks, ::setSongs)
+        }
+    }
+
+    /**
+     * The tracks of a Spotify page, matched to what this app will play.
+     *
+     * Shared by the playlist page and the collection pages, because the
+     * matching is the same: a row goes up as soon as the track is read, each
+     * marked as still waiting for its YouTube Music version, and the matches
+     * swap in as they arrive — so the page can be played from before the last
+     * song has been found.
+     */
+    private suspend fun matchSpotifyTracks(
+        browseId: String,
+        tracks: List<SpotifyTrack>,
+        setSongs: (UiState<List<Song>>) -> Unit,
+    ) {
+        setSongs(UiState.Success(tracks.map { it.asPendingSong() }))
+        val gate = Semaphore(SPOTIFY_MATCH_PARALLELISM)
+        coroutineScope {
+            tracks.forEachIndexed { index, track ->
+                launch {
+                    gate.withPermit {
+                        // The page may have been closed while the search was
+                        // running; the match is then thrown away rather than
+                        // pushed onto a page that is no longer there.
+                        if (_detailStack.value.none { it.browseId == browseId }) return@withPermit
+                        val match = runCatching { SpotifyImporter.matchTrack(track) }.getOrNull()
+                        // A track no source could be matched to is still a row
+                        // of Spotify's catalogue, and it is still playable: the
+                        // player asks the enabled sources for the recording by
+                        // name when the row is reached (see the `spotify:`
+                        // resolver in [com.music.bitchord.playback.PlaybackService]).
+                        //
+                        // It used to be written as a missing row instead, and
+                        // that was the greyed-out, unclickable row the
+                        // listener saw: a playlist whose tracks the matcher
+                        // had not found was a playlist that could not be
+                        // played, when the only thing that had failed was a
+                        // lookup done before the row was ever pressed.
+                        val found = match?.copy(thumbnailUrl = match.thumbnailUrl ?: track.imageUrl)
+                            ?: SpotifyHomeSource.songFor(track)
+                        // The Spotify id behind the row, remembered wherever the
+                        // row came from. The station a listener starts from this
+                        // track is asked for by that id, and a row matched on the
+                        // page never went through the code that used to record
+                        // it — so "start radio" had no seed to ask Spotify about
+                        // and answered from the listener's library instead.
+                        SpotifyHomeSource.rememberSpotifyId(found.videoId, track.id)
+                        _detailStack.value = _detailStack.value.map { page ->
+                            val list = (page.songs as? UiState.Success<List<Song>>)?.data
+                            if (page.browseId == browseId && list != null && index < list.size) {
+                                page.copy(songs = UiState.Success(list.toMutableList().also { it[index] = found }))
+                            } else page
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     fun reloadLocalDetail(browseId: String) {
         viewModelScope.launch {
@@ -4296,14 +4691,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * Unlocks at 16 fav tracks+artists total, or 10 artists alone.
      */
     val flowStatus: StateFlow<FlowStatus> =
-        combine(_library, likeStatuses) { library, likes ->
+        combine(_library, likeStatuses, AppSettings.homeProvider) { library, likes, provider ->
             val favTracks = likes.count { it.value == LikeStatus.LIKE }
             val shelves = (library as? UiState.Success)?.data?.shelves.orEmpty()
             val artists = shelves.firstOrNull { it.title.equals("Artists", true) }?.items?.size ?: 0
             val subs = shelves.firstOrNull { it.title.equals("Subscriptions", true) }?.items?.size ?: 0
             val favArtists = maxOf(artists, subs)
+            // Flow is built from the provider that is selected. A listener on
+            // the Spotify catalogue has a whole library over there, and the
+            // YouTube counts this used to read are zero — which is what put
+            // "Like 16 more songs" in front of somebody with thousands.
+            val spotify = provider == HomeProvider.SPOTIFY
             FlowStatus(
-                unlocked = FlowRules.isUnlocked(favTracks, favArtists),
+                unlocked = spotify || FlowRules.isUnlocked(favTracks, favArtists),
                 favTrackCount = favTracks,
                 favArtistCount = favArtists,
             )
@@ -4388,20 +4788,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // the hourly refresh are all the same; only the seed pool is.
         if (AppSettings.homeProvider.value == HomeProvider.SPOTIFY) {
             val seeds = runCatching { SpotifyHomeSource.flowSeeds() }.getOrNull()
-            if (seeds != null && !seeds.isEmpty) {
-                return flowQueueFrom(
-                    FlowEngine.SeedPool(
-                        favorites = seeds.top,
-                        history = seeds.recent,
-                        quickPicks = emptyList(),
-                        moodPool = emptyList(),
-                    ),
-                    limit,
-                )
+            if (seeds == null || seeds.isEmpty) {
+                // Deliberately *not* falling back to the YouTube seeds.
+                //
+                // It did, and that is the bug this replaced: Spotify selected,
+                // Spotify unable to answer, and Flow quietly built a YouTube
+                // mix — a mix that looks like it works, is trained on the wrong
+                // provider, and hides the failure instead of showing it. An
+                // empty Flow says what is true.
+                return emptyList()
             }
-            // Nothing could be read, so the YouTube seeds below are used rather
-            // than handing the engine an empty pool: a mix from the other
-            // provider is worse than none only in theory.
+            return flowQueueFrom(
+                FlowEngine.SeedPool(
+                    favorites = seeds.top,
+                    history = seeds.recent,
+                    quickPicks = emptyList(),
+                    moodPool = emptyList(),
+                ),
+                limit,
+                // The expansion is Spotify's too: the station Spotify would
+                // start for the seed, or the artists Spotify puts beside the
+                // seed's artist. Expanding a Spotify mix through YouTube's
+                // radio is how this mix stopped being the listener's.
+                relatedTracks = { seed ->
+                    com.music.bitchord.data.spotify.SpotifyAlgorithm.more(seed, FLOW_EXPANSION)
+                },
+            )
         }
         val lib = (_library.value as? UiState.Success)?.data
         val favorites = (lib?.likedSongs.orEmpty() + lib?.librarySongs.orEmpty())
@@ -4433,7 +4845,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * removes, which is why the buffer only exists when there is something to
      * remove.
      */
-    private suspend fun flowQueueFrom(seeds: FlowEngine.SeedPool, limit: Int): List<Song> {
+    private suspend fun flowQueueFrom(
+        seeds: FlowEngine.SeedPool,
+        limit: Int,
+        relatedTracks: (suspend (Song) -> List<Song>)? = null,
+    ): List<Song> {
         val buffer = if (AppSettings.blockedArtists.value.isEmpty()) 0 else 12
         return FlowEngine.buildInitialQueue(
             seeds = seeds,
@@ -4443,6 +4859,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             config = FlowStore.config,
             limit = limit + buffer,
             genreOf = ::flowGenreOf,
+            relatedTracks = relatedTracks,
         ).withoutBlockedArtists().distinctBy { it.videoId }.take(limit)
     }
 
@@ -4592,7 +5009,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val out = current.toMutableList()
                 for (seed in tail) {
                     if (out.size >= current.size + limit) break
-                    val related = YtMusicRepository.radio(seed.videoId).getOrNull().orEmpty()
+                    // The top-up is the provider's algorithm as well: a mix
+                    // that starts as Spotify's and grows through YouTube's
+                    // radio is half Spotify and half YouTube.
+                    val related = if (AppSettings.homeProvider.value == HomeProvider.SPOTIFY) {
+                        runCatching {
+                            com.music.bitchord.data.spotify.SpotifyAlgorithm.more(seed, FLOW_EXPANSION)
+                        }.getOrDefault(emptyList())
+                    } else {
+                        YtMusicRepository.radio(seed.videoId).getOrNull().orEmpty()
+                    }
                         .withoutBlockedArtists()
                         .filterNot { c ->
                             FlowEngine.isExcluded(

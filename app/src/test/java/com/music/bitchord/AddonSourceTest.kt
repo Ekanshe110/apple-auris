@@ -44,6 +44,16 @@ class AddonSourceTest {
     /** Every request the server saw, in order, for assertions about the wire. */
     private val seen = mutableListOf<RecordedRequest>()
 
+    /**
+     * The connection ceiling as it was before this class pinned it.
+     *
+     * Held so it can be put back. It used to be left pinned, which made this
+     * class decide what *other* classes were testing — the resolver asks this
+     * setting whether lossless is even wanted, so a later test about swapping to
+     * a FLAC failed on a value this one had chosen and never restored.
+     */
+    private var qualityBefore: AudioQuality = AudioQuality.LOSSLESS
+
     @Before
     fun setUp() {
         server = MockWebServer()
@@ -58,14 +68,15 @@ class AddonSourceTest {
         // Both are read on every stream answer. Pinned so a test asserting on
         // format never depends on what the machine running it can decode.
         DeviceCodecs.forced = true
-        AppSettings.dolbyAtmos.value = true
+        qualityBefore = AppSettings.audioQualityWifi.value
+        AppSettings.audioQualityWifi.value = AudioQuality.DOLBY
     }
 
     @After
     fun tearDown() {
         server.shutdown()
         DeviceCodecs.forced = null
-        AppSettings.dolbyAtmos.value = true
+        AppSettings.audioQualityWifi.value = qualityBefore
     }
 
     // ── URL handling ──────────────────────────────────────────────────────
@@ -274,7 +285,7 @@ class AddonSourceTest {
     fun `manual refresh asks again for a cached stream URL`() = runBlocking {
         // The Atmos rung is a request of its own; this test is counting the
         // ordinary one. Pinned off so the count is one lookup, not two.
-        AppSettings.dolbyAtmos.value = false
+        AppSettings.audioQualityWifi.value = AudioQuality.LOSSLESS
         route("/manifest.json", manifest())
         route("/stream/track", json("""{"url":"https://cdn/old.flac","codec":"flac"}"""))
         val source = AddonSource(config())
@@ -335,7 +346,7 @@ class AddonSourceTest {
     @Test
     fun `an addon that enumerates no options is sent the tier verbatim`() = runBlocking {
         // No immersive attempt: this is the negotiation of the ordinary tier.
-        AppSettings.dolbyAtmos.value = false
+        AppSettings.audioQualityWifi.value = AudioQuality.LOSSLESS
         route("/manifest.json", manifest())
         route("/stream/t1", json("""{"url":"https://cdn/a.flac"}"""))
 
@@ -401,8 +412,8 @@ class AddonSourceTest {
             route("/stream/t1", json("""{"url":"https://cdn/a.flac","codec":"flac"}"""))
 
             val source = AddonSource(config())
-            source.search("x", limit = 5)
-            source.stream("t1", StreamRequest.Lossless)
+            source.search("x", limit = 5, request = StreamRequest.Atmos)
+            source.stream("t1", StreamRequest.Atmos)
 
             // Exactly "auto": 1/true select the spec's strict mode, where a
             // track with no immersive mix is an error rather than a stereo
@@ -422,18 +433,17 @@ class AddonSourceTest {
         }
 
     /**
-     * Switched off in Settings is a real preference — Atmos is lossy E-AC-3,
-     * and a wired-headphones listener may want the bit-exact stereo FLAC. Not
-     * asking is what gets them it, rather than asking and then refusing the
-     * answer.
+     * A request that does not ask for the spatial mix is a real preference —
+     * Atmos is lossy E-AC-3, and a wired-headphones listener may want the
+     * bit-exact stereo FLAC. Not asking is what gets them it, rather than
+     * asking and then refusing the answer.
      *
      * The value is `none`, not an absent parameter. An addon whose schema
      * defaults `atmos` to `auto` would otherwise keep offering a mix this
      * device is about to refuse.
      */
     @Test
-    fun `atmos is explicitly declined when the setting is off`() = runBlocking {
-        AppSettings.dolbyAtmos.value = false
+    fun `atmos is explicitly declined when the request does not ask for it`() = runBlocking {
         route("/manifest.json", manifest())
         route("/stream/t1", json("""{"url":"https://cdn/a.flac","codec":"flac"}"""))
 
@@ -449,20 +459,20 @@ class AddonSourceTest {
         route("/manifest.json", manifest())
         route("/stream/t1", json("""{"url":"https://cdn/a.flac","codec":"flac"}"""))
 
-        AddonSource(config()).stream("t1", StreamRequest.Lossless)
+        AddonSource(config()).stream("t1", StreamRequest.Atmos)
 
         assertEquals("none", requestFor("/stream/t1").queryParameter("atmos"))
     }
 
     /**
      * The manifest's declared `atmos` value is a default for a host with no
-     * preference, and this host has one: the Settings switch. Leaving the
+     * preference, and this host has one: the request in force. Leaving the
      * default in place is what made an addon whose schema declares `off` serve
      * stereo forever while Atmos was switched on — "enabled but not working,
      * with the same addon".
      */
     @Test
-    fun `the Settings switch overrides a declared atmos default`() = runBlocking {
+    fun `the request overrides a declared atmos default`() = runBlocking {
         route(
             "/manifest.json",
             json(
@@ -475,15 +485,14 @@ class AddonSourceTest {
         )
         route("/stream/t1", json("""{"url":"https://cdn/a.flac","codec":"flac"}"""))
 
-        AddonSource(config()).stream("t1", StreamRequest.Lossless)
+        AddonSource(config()).stream("t1", StreamRequest.Atmos)
 
         assertEquals("auto", requestFor("/stream/t1").queryParameter("atmos"))
     }
 
     /** The same override in the other direction: a declared `auto` is declined. */
     @Test
-    fun `switching Atmos off overrides a declared auto default`() = runBlocking {
-        AppSettings.dolbyAtmos.value = false
+    fun `a request that does not ask for atmos overrides a declared auto default`() = runBlocking {
         route(
             "/manifest.json",
             json(
@@ -514,7 +523,7 @@ class AddonSourceTest {
         route("/manifest.json", manifest())
         server.dispatcher = atmosDispatcher("https://cdn.example.com/dash/tidal-atmos")
 
-        val stream = AddonSource(config()).stream("t1", StreamRequest.Lossless)!!
+        val stream = AddonSource(config()).stream("t1", StreamRequest.Atmos)!!
 
         assertTrue(stream.format.isDolbyAtmos)
         val streams = streamRequests()
@@ -534,7 +543,7 @@ class AddonSourceTest {
         route("/manifest.json", manifest())
         route("/stream/t1", json("""{"url":"https://cdn/a.flac","codec":"flac"}"""))
 
-        val stream = AddonSource(config()).stream("t1", StreamRequest.Lossless)!!
+        val stream = AddonSource(config()).stream("t1", StreamRequest.Atmos)!!
 
         assertEquals("flac", stream.format.codec)
         assertEquals(false, stream.format.isDolbyAtmos)
@@ -561,7 +570,7 @@ class AddonSourceTest {
             "LOSSLESS" to json("""{"url":"https://cdn/a.flac","codec":"flac"}"""),
         )
 
-        val stream = AddonSource(config()).stream("t1", StreamRequest.Lossless)!!
+        val stream = AddonSource(config()).stream("t1", StreamRequest.Atmos)!!
 
         assertEquals("flac", stream.format.codec)
         assertEquals(listOf("atmos", "hi_res", "LOSSLESS"), streamRequests().map { it.queryParameter("quality") })
@@ -582,7 +591,7 @@ class AddonSourceTest {
             "HIGH" to json("""{"url":"https://cdn/a.mp3","codec":"mp3","bitrate":128}"""),
         )
 
-        val stream = AddonSource(config()).stream("t1", StreamRequest.Lossless)!!
+        val stream = AddonSource(config()).stream("t1", StreamRequest.Atmos)!!
 
         assertEquals("mp3", stream.format.codec)
         assertTrue(stream.belowRequest)
@@ -593,21 +602,21 @@ class AddonSourceTest {
     }
 
     /**
-     * Choosing the rung is a statement on its own. The master switch is a
-     * standing preference and defaults on, so the rung has to carry the
-     * request when it has been turned off — a rung labelled Dolby Atmos that
-     * served stereo would be the same failure the rung exists to fix.
+     * The two questions are asked separately. A file being kept and a stream
+     * being played are different questions, and a request that wants the
+     * spatial mix wants it whatever the connection's streaming rung is doing —
+     * the Dolby *download* rung is asked for on a connection whose stream is
+     * plain lossless, and gets the spatial mix.
      */
     @Test
-    fun `the Dolby Atmos quality rung is enough with the master switch off`() = runBlocking {
-        AppSettings.dolbyAtmos.value = false
-        AppSettings.audioQualityWifi.value = AudioQuality.DOLBY
-        AppSettings.audioQualityCellular.value = AudioQuality.DOLBY
+    fun `the immersive request asks for the spatial mix whatever the streaming rung says`() = runBlocking {
+        AppSettings.audioQualityWifi.value = AudioQuality.LOSSLESS
+        AppSettings.audioQualityCellular.value = AudioQuality.LOSSLESS
         try {
             route("/manifest.json", manifest())
             server.dispatcher = atmosDispatcher("https://cdn.example.com/dash/tidal-atmos")
 
-            val stream = AddonSource(config()).stream("t1", StreamRequest.Lossless)!!
+            val stream = AddonSource(config()).stream("t1", StreamRequest.Atmos)!!
 
             assertTrue(stream.format.isDolbyAtmos)
             assertEquals("atmos", streamRequests()[0].queryParameter("quality"))
@@ -637,7 +646,7 @@ class AddonSourceTest {
         )
         route("/stream/t1", json("""{"url":"https://cdn/a.flac","codec":"flac"}"""))
 
-        AddonSource(config()).stream("t1", StreamRequest.Lossless)
+        AddonSource(config()).stream("t1", StreamRequest.Atmos)
 
         assertEquals("atmos", streamRequests()[0].queryParameter("quality"))
     }
@@ -659,7 +668,7 @@ class AddonSourceTest {
             ),
         )
 
-        val stream = AddonSource(config()).stream("t1", StreamRequest.Lossless)!!
+        val stream = AddonSource(config()).stream("t1", StreamRequest.Atmos)!!
 
         assertEquals("eac3-joc", stream.format.codec)
         assertTrue(stream.format.isDolbyAtmos)
@@ -678,7 +687,7 @@ class AddonSourceTest {
             ),
         )
 
-        val stream = AddonSource(config()).stream("t1", StreamRequest.Lossless)!!
+        val stream = AddonSource(config()).stream("t1", StreamRequest.Atmos)!!
 
         assertEquals("eac3-joc", stream.format.codec)
         assertTrue(stream.format.isDolbyAtmos)
@@ -695,7 +704,7 @@ class AddonSourceTest {
         route("/manifest.json", manifest())
         route("/stream/t1", json("""{"url":"https://cdn/a.mp4","codec":"eac3_joc","mimeType":"audio/mp4"}"""))
 
-        val stream = AddonSource(config()).stream("t1", StreamRequest.Lossless)!!
+        val stream = AddonSource(config()).stream("t1", StreamRequest.Atmos)!!
 
         assertEquals("eac3-joc", stream.format.codec)
         assertTrue(stream.format.isDolbyAtmos)
@@ -736,7 +745,7 @@ class AddonSourceTest {
         route("/manifest.json", manifest())
         server.dispatcher = atmosDispatcher(url)
 
-        val stream = AddonSource(config()).stream("t1", StreamRequest.Lossless)!!
+        val stream = AddonSource(config()).stream("t1", StreamRequest.Atmos)!!
 
         assertEquals(url, stream.url)
         assertEquals("eac3-joc", stream.format.codec)
@@ -756,7 +765,7 @@ class AddonSourceTest {
      */
     @Test
     fun `without the hint the same addon answers with the stereo ladder`() = runBlocking {
-        AppSettings.dolbyAtmos.value = false
+        AppSettings.audioQualityWifi.value = AudioQuality.LOSSLESS
         route("/manifest.json", manifest())
         server.dispatcher = atmosDispatcher("https://cdn.example.com/dash/tidal-atmos")
 
@@ -1040,7 +1049,7 @@ class AddonSourceTest {
     fun `a rate-limited request is waited out and retried`() = runBlocking {
         // The queue below is one stream lookup long; the immersive attempt
         // would consume it first. This test is about the 429, not the rung.
-        AppSettings.dolbyAtmos.value = false
+        AppSettings.audioQualityWifi.value = AudioQuality.LOSSLESS
         route("/manifest.json", manifest())
         val answers = ArrayDeque(
             listOf(
@@ -1113,7 +1122,7 @@ class AddonSourceTest {
         route("/manifest.json", manifest())
         route("/stream/t1", json("""{"url":"https://cdn/a.mp4","codec":"eac3-joc","quality":"Dolby Atmos"}"""))
 
-        val stream = AddonSource(config()).stream("t1", StreamRequest.Lossless)
+        val stream = AddonSource(config()).stream("t1", StreamRequest.Atmos)
         assertNotNull(stream)
         assertTrue(stream!!.format.isDolbyAtmos)
     }

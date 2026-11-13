@@ -112,6 +112,13 @@ enum class OutputPcmMode(val label: String) {
  * while configured sources can supply their own AAC or lossless copy. And
  * [LOSSLESS] has no streaming counterpart at all: it is the only rung that lets
  * a configured source's bit-exact file end up as a file on disk.
+ *
+ * [DOLBY] is the one rung that asks for something other than a copy of the
+ * recording: the spatial mix, where the catalogue holds one, and the bit-exact
+ * ladder below it where it does not. It is a rung of its own rather than a
+ * modifier on [LOSSLESS] because the two are different files — E-AC-3 JOC is
+ * lossy and spatial, FLAC is neither — and a listener who picked one deserves
+ * the file they picked rather than the other one.
  */
 enum class DownloadQuality(
     /** Ceiling for the YouTube Opus ladder. [Int.MAX_VALUE] means "whichever rung is best". */
@@ -122,15 +129,32 @@ enum class DownloadQuality(
     val perTrack: String,
     /** Whether a source's bit-exact file is worth keeping, or a transcode will do. */
     val keepsLossless: Boolean,
+    /**
+     * Whether this rung asks for the immersive mix.
+     *
+     * Its own statement rather than something read off the streaming rung: the
+     * file being kept and the stream being played are two questions, and a
+     * listener who asked for Dolby Atmos while streaming did not ask for a
+     * spatial mix in the file they save — nor the other way round.
+     */
+    val wantsAtmos: Boolean = false,
 ) {
     STANDARD(128, "Standard", "~128 kbps Opus · fits more on the device", "~4 MB", false),
     HIGH(Int.MAX_VALUE, "High", "Best audio on offer; source quality first", "~8 MB", false),
     LOSSLESS(
         Int.MAX_VALUE,
         "Lossless",
-        "Bit-exact if a source has it, best Opus if not",
+        "Up to hi-res · never the spatial mix",
         "~35 MB",
         true,
+    ),
+    DOLBY(
+        Int.MAX_VALUE,
+        "Dolby Atmos",
+        "Immersive E-AC-3 where held, lossless below it",
+        "~20 MB",
+        true,
+        wantsAtmos = true,
     ),
 }
 
@@ -290,6 +314,27 @@ object AppSettings {
      */
     val seamlessQualityUpgrade = MutableStateFlow(false)
 
+    /**
+     * Whether the songs kept on the device are upgraded to a better copy
+     * while they play.
+     *
+     * A download is a copy of whatever the sources held when it was saved —
+     * often a 128kbps transcode — and it is played for as long as the
+     * listener keeps it. The sources can do better now, so the second look
+     * offers the file's own track to them.
+     *
+     * On by default, because the path it governs has always been there: the
+     * question was never whether a saved song *may* be upgraded, but whether
+     * the upgrade could actually land — and it could not, because the tier
+     * below the one that was asked for was refused as an answer. This switch
+     * is the listener's way of saying no to it.
+     *
+     * Read through [effectiveAutoUpgradeLocalStorage] rather than this: an
+     * upgrade needs the network, so offline mode turns this off whatever it
+     * says here.
+     */
+    val autoUpgradeLocalStorage = MutableStateFlow(true)
+
     /** The CPU budget used by Beat This! and vocal analysis for Automix. */
     val automixPerformanceMode = MutableStateFlow(AutomixPerformanceMode.BALANCED)
 
@@ -404,44 +449,27 @@ object AppSettings {
     val loudnessOffOnSpeaker = MutableStateFlow(true)
 
     /**
-     * Whether a source offering a Dolby Atmos rendition is allowed to serve it.
-     *
-     * On by default: where the device can decode it, Atmos is the premium
-     * rendition the catalogue holds and the one most people are paying a
-     * subscription for.
-     *
-     * Off is a real preference and not just a safety valve. Atmos is E-AC-3,
-     * which is *lossy* — a track with an Atmos master is frequently also held
-     * as a FLAC, and someone listening on wired headphones may well prefer the
-     * bit-exact stereo copy to a spatial mix their output can't render. Turning
-     * this off is how they say so; see
-     * [ModuleSource.unplayable][com.music.bitchord.data.sources.ModuleSource],
-     * which is where the refusal is applied.
-     *
-     * Independent of whether the device *can* decode it — that question is
-     * [DeviceCodecs.playsDolbyAtmos][com.music.bitchord.data.sources.DeviceCodecs],
-     * and the two are deliberately not folded together: this one is the
-     * listener's answer, is persisted, and must survive being read on a phone
-     * that cannot honour it (a restored backup, a swapped device) without
-     * quietly rewriting itself.
-     */
-    val dolbyAtmos = MutableStateFlow(true)
-
-    /**
      * Whether the listener wants the immersive mix on the connection in hand.
      *
-     * Two ways to say yes, and they are not duplicates: the master switch is a
-     * standing preference, while [AudioQuality.DOLBY] is the same statement
-     * made on the Wi-Fi or mobile-data rung, where most people actually look
-     * for a quality picker. Choosing the rung is the more specific answer and
-     * is honoured even with the switch off — a rung that says "Dolby Atmos"
-     * and then serves stereo would be the same bug the rung exists to fix.
+     * The quality rung is the *only* thing that decides this. It used to be two
+     * statements — a standalone "Dolby Atmos" switch, on by default, OR'd with
+     * [AudioQuality.DOLBY] — and that combination was wrong in the way the
+     * switch was designed to be convenient: with the switch on, choosing
+     * **Lossless** still served Atmos. Lossless means the bit-exact stereo
+     * ladder, up to hi-res; Atmos is E-AC-3, which is lossy, and it is a
+     * different listen rather than a higher rung of the same one. A listener who
+     * asked for lossless and got a spatial mix had no way to say otherwise —
+     * the rung they picked was not the thing being honoured.
      *
-     * Callers still pair this with [DeviceCodecs.playsDolbyAtmos]; capability
-     * is the phone's answer, not the listener's.
+     * So the switch is gone and the rung answers: [AudioQuality.DOLBY] asks for
+     * Atmos first and falls back down the lossless ladder below it, and every
+     * other rung — Lossless included — leaves Atmos out of the walk entirely.
+     *
+     * Callers still pair this with [DeviceCodecs.playsDolbyAtmos]; capability is
+     * the phone's answer, not the listener's.
      */
     val wantsDolbyAtmos: Boolean
-        get() = dolbyAtmos.value || effectiveAudioQuality == AudioQuality.DOLBY
+        get() = effectiveAudioQuality == AudioQuality.DOLBY
 
     /**
      * Widens stereo output via [com.music.bitchord.playback.SpatialAudioProcessor],
@@ -712,6 +740,15 @@ object AppSettings {
      * to the sheet-swipe jank.
      */
     val liquidGlassIntensity = MutableStateFlow(1f)
+
+    /**
+     * Frosts the glass instead of refracting it, BitChord's "Better Performance
+     * for Glass": the blur is deeper and the lens shader is skipped, for phones
+     * the refraction is too much for. The bar's rim, shadow, tint and motion
+     * all stay; only the lens goes. A Liquid Glass option, honoured only while
+     * [liquidGlass] is on.
+     */
+    val glassPerformance = MutableStateFlow(false)
 
     /** Blurs unfocused lyric lines, keeping the active line sharp. */
     val lyricsBlur = MutableStateFlow(true)
@@ -1328,6 +1365,37 @@ object AppSettings {
         combine(offlineModeFlow, streamingAvailableFlow) { manual, streaming -> manual || !streaming }
             .stateIn(networkScope, SharingStarted.Eagerly, false)
 
+    /**
+     * Whether the songs on the device are upgraded right now.
+     *
+     * The listener's own answer and the app's ability to act on it, in that
+     * order: an upgrade is a fetch, so an app that is offline — because the
+     * switch says so or because nothing has been reachable for a while —
+     * cannot make one, and a switch left on says nothing about what is
+     * possible.
+     *
+     * The listener's answer is kept while it is off. Coming back online
+     * restores the upgrade; it does not silently turn a switch the listener
+     * had deliberately turned off back on, and it does not quietly forget one
+     * they had turned on.
+     */
+    val effectiveAutoUpgradeLocalStorage: StateFlow<Boolean> =
+        combine(autoUpgradeLocalStorage, effectiveOffline) { requested, offline ->
+            autoUpgradeLocalStorageAllowed(requested, offline)
+        }.stateIn(networkScope, SharingStarted.Eagerly, true)
+
+    /**
+     * Whether the songs on the device may be upgraded, given the listener's
+     * answer and whether the app is offline.
+     *
+     * Spelled out as its own function so the rule can be read — and tested —
+     * on its own. An upgrade is a fetch, so offline mode turns it off
+     * whatever the listener said, and the listener's answer is kept for when
+     * the network comes back rather than being overwritten by it.
+     */
+    fun autoUpgradeLocalStorageAllowed(requested: Boolean, offline: Boolean): Boolean =
+        requested && !offline
+
     fun setOfflineMode(value: Boolean) {
         if (offlineModeFlow.value == value) return
         offlineModeFlow.value = value
@@ -1441,6 +1509,7 @@ object AppSettings {
         crossfadeSeconds.value = prefs.getInt(KEY_CROSSFADE, 0)
         smartFadeEnabled.value = prefs.getBoolean(KEY_SMART_FADE, false)
         seamlessQualityUpgrade.value = prefs.getBoolean(KEY_SEAMLESS_QUALITY_UPGRADE, false)
+        autoUpgradeLocalStorage.value = prefs.getBoolean(KEY_AUTO_UPGRADE_LOCAL_STORAGE, true)
         automixPerformanceMode.value = runCatching {
             AutomixPerformanceMode.valueOf(
                 prefs.getString(KEY_AUTOMIX_PERFORMANCE_MODE, null) ?: AutomixPerformanceMode.BALANCED.name,
@@ -1467,7 +1536,11 @@ object AppSettings {
         preferUsbDac.value = prefs.getBoolean(KEY_PREFER_USB_DAC, false)
         loudnessNormalization.value = prefs.getBoolean(KEY_LOUDNESS_NORMALIZATION, true)
         loudnessOffOnSpeaker.value = prefs.getBoolean(KEY_LOUDNESS_OFF_ON_SPEAKER, true)
-        dolbyAtmos.value = prefs.getBoolean(KEY_DOLBY_ATMOS, true)
+        // The old `dolby_atmos` preference is deliberately not read any more.
+        // It was a second way to ask for Atmos, on by default, which is what
+        // made Lossless serve a spatial mix; the quality rung is the only
+        // statement now. Leftover keys are ignored rather than migrated: there
+        // is nothing for them to migrate *to*.
         spatialAudio.value = prefs.getBoolean(KEY_SPATIAL_AUDIO, false)
         liquidGlassHaptics.value = prefs.getBoolean(KEY_LIQUID_GLASS_HAPTICS, true)
         hideStatusBarInPlayer.value = prefs.getBoolean(KEY_HIDE_STATUS_BAR_IN_PLAYER, false)
@@ -1550,6 +1623,7 @@ object AppSettings {
         podcastsEnabled.value = prefs.getBoolean(KEY_PODCASTS_ENABLED, true)
         liquidGlassIntensity.value = prefs.getFloat(KEY_LIQUID_GLASS_INTENSITY, 1f)
             .coerceIn(MIN_LIQUID_GLASS_INTENSITY, MAX_LIQUID_GLASS_INTENSITY)
+        glassPerformance.value = prefs.getBoolean(KEY_GLASS_PERFORMANCE, false)
         lyricsBlur.value = prefs.getBoolean(KEY_LYRICS_BLUR, !lowEndDevice)
         textGlow.value = prefs.getBoolean(KEY_TEXT_GLOW, !lowEndDevice)
         showNowPlayingLyrics.value = prefs.getBoolean(KEY_SHOW_NOW_PLAYING_LYRICS, true)
@@ -1961,6 +2035,18 @@ object AppSettings {
         prefs.edit().putBoolean(KEY_SEAMLESS_QUALITY_UPGRADE, value).apply()
     }
 
+    /**
+     * Records the listener's answer about upgrading the songs on the device.
+     *
+     * The answer is stored as it was given, not as it applies: offline mode
+     * turns the upgrade off on its own, and the listener's own switch is
+     * still theirs when the network comes back.
+     */
+    fun setAutoUpgradeLocalStorage(value: Boolean) {
+        autoUpgradeLocalStorage.value = value
+        prefs.edit().putBoolean(KEY_AUTO_UPGRADE_LOCAL_STORAGE, value).apply()
+    }
+
     fun setAutomixPerformanceMode(value: AutomixPerformanceMode) {
         automixPerformanceMode.value = value
         prefs.edit().putString(KEY_AUTOMIX_PERFORMANCE_MODE, value.name).apply()
@@ -1975,7 +2061,11 @@ object AppSettings {
      */
     fun setHomeProvider(value: HomeProvider) {
         homeProvider.value = value
-        prefs.edit().putString(KEY_HOME_PROVIDER, value.name).apply()
+        // Committed, not applied: the caller restarts the process as soon as
+        // this returns, and an async write that has not reached disk when the
+        // process dies is a switch that reports success and comes back on the
+        // old provider — which is exactly what it did.
+        prefs.edit().putString(KEY_HOME_PROVIDER, value.name).commit()
     }
 
     /**
@@ -1992,11 +2082,6 @@ object AppSettings {
     fun setSkipSilence(value: Boolean) {
         skipSilence.value = value
         prefs.edit().putBoolean(KEY_SKIP_SILENCE, value).apply()
-    }
-
-    fun setDolbyAtmos(value: Boolean) {
-        dolbyAtmos.value = value
-        prefs.edit().putBoolean(KEY_DOLBY_ATMOS, value).apply()
     }
 
     fun setLiquidGlassHaptics(value: Boolean) {
@@ -2245,6 +2330,11 @@ object AppSettings {
         val clamped = normalizeLiquidGlassIntensity(value)
         liquidGlassIntensity.value = clamped
         prefs.edit().putFloat(KEY_LIQUID_GLASS_INTENSITY, clamped).apply()
+    }
+
+    fun setGlassPerformance(value: Boolean) {
+        glassPerformance.value = value
+        prefs.edit().putBoolean(KEY_GLASS_PERFORMANCE, value).apply()
     }
 
     fun setHighPerformanceMode(value: Boolean) {
@@ -3052,6 +3142,7 @@ object AppSettings {
     private const val KEY_CROSSFADE = "crossfade_seconds"
     private const val KEY_SMART_FADE = "smart_fade_enabled"
     private const val KEY_SEAMLESS_QUALITY_UPGRADE = "seamless_quality_upgrade"
+    private const val KEY_AUTO_UPGRADE_LOCAL_STORAGE = "auto_upgrade_local_storage"
     private const val KEY_AUTOMIX_PERFORMANCE_MODE = "automix_performance_mode"
     private const val KEY_HOME_PROVIDER = "home_provider"
     private const val KEY_AUTOMIX_ENGINE = "automix_engine"
@@ -3061,7 +3152,6 @@ object AppSettings {
     private const val KEY_PREFER_USB_DAC = "prefer_usb_dac"
     private const val KEY_LOUDNESS_NORMALIZATION = "loudness_normalization"
     private const val KEY_LOUDNESS_OFF_ON_SPEAKER = "loudness_off_on_speaker"
-    private const val KEY_DOLBY_ATMOS = "dolby_atmos"
     private const val KEY_SPATIAL_AUDIO = "spatial_audio"
     private const val KEY_LIQUID_GLASS_HAPTICS = "liquid_glass_haptics"
     private const val KEY_HIDE_STATUS_BAR_IN_PLAYER = "hide_status_bar_in_player"
@@ -3138,6 +3228,7 @@ object AppSettings {
     private const val KEY_SMART_VERSION_ALIGNMENT = "smart_version_alignment"
     private const val KEY_REDUCE_BLUR = "reduce_dynamic_blur"
     private const val KEY_LIQUID_GLASS = "liquid_glass"
+    private const val KEY_GLASS_PERFORMANCE = "glass_performance"
     private const val KEY_FOLDING_NAV_BAR = "folding_nav_bar"
     private const val KEY_PODCASTS_ENABLED = "podcasts_enabled"
     private const val KEY_LIQUID_GLASS_INTENSITY = "liquid_glass_intensity"
