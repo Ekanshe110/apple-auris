@@ -102,6 +102,7 @@ import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -670,6 +671,12 @@ private fun AppRootBox(content: @Composable BoxScope.() -> Unit) {
     }
 }
 
+/** Current Apple catalogue availability and its single owning source. */
+private data class AppleCatalogUiState(
+    val ready: Boolean,
+    val config: com.music.bitchord.data.sources.SourceConfig?,
+)
+
 /** Search sources offered for the current Apple catalogue configuration. */
 private fun visibleSearchSources(appleCatalogReady: Boolean): List<SearchSource> = buildList {
     add(SearchSource.YOUTUBE)
@@ -1129,15 +1136,19 @@ private fun BitChordApp(
     // Keep this as one captured value. The root composable already sits close
     // to dex's 255-register constructor limit, so collecting the toggle and
     // source list separately would add avoidable captures to nested lambdas.
-    val appleCatalogReady by remember {
+    val appleCatalogState by remember {
         derivedStateOf {
-            AppSettings.appleCatalogEnabled.value && SourceRegistry.configs.value.any {
+            val config = SourceRegistry.configs.value.firstOrNull {
                 it.kind == com.music.bitchord.data.sources.SourceKind.ADDON &&
                     it.enabled && it.isComplete &&
                     it.catalogRole == com.music.bitchord.data.sources.SourceCatalogRole.APPLE_MUSIC
             }
+            AppleCatalogUiState(
+                ready = AppSettings.appleCatalogEnabled.value && config != null,
+                config = config,
+            )
         }
-    }.collectAsStateWithLifecycle()
+    }.collectAsState()
     val libraryResults by viewModel.libraryResults.collectAsStateWithLifecycle()
     LaunchedEffect(selectedTab) {
         if (selectedTab == TAB_RADIO || showGenres) viewModel.ensureExploreLoaded()
@@ -2743,8 +2754,8 @@ private fun BitChordApp(
         }
         viewModel.setSearchSource(source)
     }
-    LaunchedEffect(searchSource, appleCatalogReady) {
-        if (searchSource == SearchSource.APPLE && searchSource !in visibleSearchSources(appleCatalogReady)) {
+    LaunchedEffect(searchSource, appleCatalogState.ready) {
+        if (searchSource == SearchSource.APPLE && searchSource !in visibleSearchSources(appleCatalogState.ready)) {
             onSearchSourceChange(SearchSource.YOUTUBE)
         }
     }
@@ -2790,7 +2801,7 @@ private fun BitChordApp(
         onToggleSource = {
             // Cycle only through the sources currently offered. Apple is
             // additive and never displaces Spotify.
-            val currentSources = visibleSearchSources(appleCatalogReady)
+            val currentSources = visibleSearchSources(appleCatalogState.ready)
             onSearchSourceChange(
                 currentSources[
                     (currentSources.indexOf(searchSource) + 1)
@@ -4410,12 +4421,7 @@ private fun BitChordApp(
                             contentPadding = listPadding,
                         )
                     } else if (key == "apple_library") {
-                        val appleConfig = sourceConfigs.firstOrNull {
-                            it.kind == com.music.bitchord.data.sources.SourceKind.ADDON &&
-                                it.enabled &&
-                                it.isComplete &&
-                                it.catalogRole == com.music.bitchord.data.sources.SourceCatalogRole.APPLE_MUSIC
-                        }
+                        val appleConfig = appleCatalogState.config
                         if (appleConfig == null) {
                             Text(
                                 text = "Apple Music library is not configured",
@@ -5237,7 +5243,7 @@ private fun BitChordApp(
                             // The settings page's own two-state selector, so the
                             // app has one look for "pick one of these".
                             sourceSwitcher = {
-                                val currentSources = visibleSearchSources(appleCatalogReady)
+                                val currentSources = visibleSearchSources(appleCatalogState.ready)
                                 SegmentedControl(
                                     options = currentSources.map { source ->
                                         when (source) {
