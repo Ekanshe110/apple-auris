@@ -421,6 +421,7 @@ private fun SearchBarPlaceholder(
                         SearchSource.LIBRARY -> Icons.Rounded.LibraryMusic
                         SearchSource.SPOTIFY -> Icons.Rounded.MusicNote
                         SearchSource.YOUTUBE -> Icons.Rounded.Language
+                        SearchSource.APPLE -> Icons.Rounded.LibraryMusic
                     },
                     contentDescription = null,
                     tint = contentColor,
@@ -555,6 +556,7 @@ private fun NavBarSearchInputBar(
                         SearchSource.LIBRARY -> Icons.Rounded.LibraryMusic
                         SearchSource.SPOTIFY -> Icons.Rounded.MusicNote
                         SearchSource.YOUTUBE -> Icons.Rounded.Language
+                        SearchSource.APPLE -> Icons.Rounded.LibraryMusic
                     },
                     contentDescription = null,
                     tint = contentColor,

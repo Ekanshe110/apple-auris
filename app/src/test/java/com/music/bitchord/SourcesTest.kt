@@ -12,6 +12,7 @@ import com.music.bitchord.data.settings.permits
 import com.music.bitchord.data.sources.DeviceCodecs
 import com.music.bitchord.data.sources.ModuleSource
 import com.music.bitchord.data.sources.MusicSource
+import com.music.bitchord.data.sources.SourceCatalogRole
 import com.music.bitchord.data.sources.SourceConfig
 import com.music.bitchord.data.sources.SourceHealth
 import com.music.bitchord.data.sources.SourceKind
@@ -67,6 +68,64 @@ class SourcesTest {
     fun `plain video ids are not source keys`() {
         assertNull(SourceRegistry.parseTrackKey("dQw4w9WgXcQ"))
         assertNull(SourceRegistry.parseTrackKey(""))
+    }
+
+    @Test
+    fun `Apple track identity is exposed only for an explicitly Apple source`() {
+        val previous = SourceRegistry.configs.value
+        try {
+            val apple = SourceConfig(
+                id = "apple-config",
+                kind = SourceKind.ADDON,
+                baseUrl = "https://apple.invalid",
+                catalogRole = SourceCatalogRole.APPLE_MUSIC,
+            )
+            val generic = SourceConfig(
+                id = "generic-config",
+                kind = SourceKind.ADDON,
+                baseUrl = "https://generic.invalid",
+            )
+            SourceRegistry.configs.value = listOf(apple, generic)
+
+            assertTrue(
+                SourceRegistry.isAppleTrack(SourceRegistry.trackKey(apple.id, "1234567890")),
+            )
+            assertFalse(
+                SourceRegistry.isAppleTrack(SourceRegistry.trackKey(generic.id, "1234567890")),
+            )
+        } finally {
+            SourceRegistry.configs.value = previous
+        }
+    }
+
+    @Test
+    fun `only the first stored Apple source keeps the catalogue role`() {
+        val normalized = SourceRegistry.sourcesForInit(
+            listOf(
+                SourceConfig(
+                    id = "apple-first",
+                    kind = SourceKind.ADDON,
+                    baseUrl = "https://first.invalid",
+                    catalogRole = SourceCatalogRole.APPLE_MUSIC,
+                ),
+                SourceConfig(
+                    id = "apple-second",
+                    kind = SourceKind.ADDON,
+                    baseUrl = "https://second.invalid",
+                    catalogRole = SourceCatalogRole.APPLE_MUSIC,
+                ),
+            ),
+            forceJioSaavnOff = false,
+        )
+
+        assertEquals(
+            SourceCatalogRole.APPLE_MUSIC,
+            normalized.first { it.id == "apple-first" }.catalogRole,
+        )
+        assertEquals(
+            SourceCatalogRole.GENERIC,
+            normalized.first { it.id == "apple-second" }.catalogRole,
+        )
     }
 
     // ---- Format reporting ---------------------------------------------------

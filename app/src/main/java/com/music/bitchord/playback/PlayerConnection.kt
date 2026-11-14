@@ -491,6 +491,7 @@ fun MediaItem.toSong() = Song(
     // though both had been known.
     downloadFormat = mediaMetadata.extras?.getString(EXTRA_DOWNLOAD_FORMAT),
     sourceQuality = mediaMetadata.extras?.getString(EXTRA_SOURCE_QUALITY),
+    appleCatalogId = mediaMetadata.extras?.getString(EXTRA_APPLE_CATALOG_ID),
 )
 
 /** @see Song.fromAutoplay */
@@ -576,6 +577,9 @@ internal const val EXTRA_DOWNLOAD_FORMAT = "bitchord.downloadFormat"
 
 /** What the stream claimed to be, e.g. "128 kbps". Survives the round trip. */
 internal const val EXTRA_SOURCE_QUALITY = "bitchord.sourceQuality"
+
+/** Apple's catalogue song id, kept distinct from the addon's playback token. */
+internal const val EXTRA_APPLE_CATALOG_ID = "bitchord.appleCatalogId"
 
 /**
  * How long the track runs, as the row that queued it said.
@@ -846,7 +850,7 @@ fun Song.toMediaItem(parentBrowseId: String? = null, playLocalFile: Boolean = tr
             .apply {
                 if (queueTier != QueueTier.CONTEXT || queueEntryId != null || fromAutoplay ||
                     offlineUri != null || durationText != null || downloadFormat != null ||
-                    sourceQuality != null ||
+                    sourceQuality != null || appleCatalogId != null ||
                     artistId != null || albumId != null || setVideoId != null ||
                     isExplicit != null || isVideo || isVideoOrigin || radioName != null ||
                     playbackSource != null || playbackSourceType != null || playbackSourceId != null ||
@@ -872,6 +876,7 @@ fun Song.toMediaItem(parentBrowseId: String? = null, playLocalFile: Boolean = tr
                             EXTRA_LOCAL_PATH to localPath,
                             EXTRA_DOWNLOAD_FORMAT to formatBadge,
                             EXTRA_SOURCE_QUALITY to sourceQuality,
+                            EXTRA_APPLE_CATALOG_ID to appleCatalogId,
                             EXTRA_DURATION to durationText,
                             EXTRA_ARTIST_ID to artistId,
                             EXTRA_ALBUM_ID to albumId,

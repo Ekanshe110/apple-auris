@@ -703,6 +703,8 @@ object QualityUpgrade {
                 // asked for the answer to be judged by their rules, and the
                 // search may not have reached a candidate yet.
                 explicit = { explicitFor(mediaId, waiting) },
+                strictConfigId = SourceRegistry.parseTrackKey(mediaId)?.first,
+                strictTrackId = SourceRegistry.parseTrackKey(mediaId)?.second,
             ).also {
                 found = it
                 if (it != null && needsLosslessFollowUp(it.format)) {

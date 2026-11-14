@@ -105,10 +105,24 @@ object LyricsRepository {
         onSourceResult: ((LyricsSource, Result?) -> Unit)? = null,
         /** Lets callers turn a cancelled race loser back into "not fetched". */
         onSourceCancelled: ((LyricsSource) -> Unit)? = null,
+        /** Known Apple Music song id, used by [LyricsSource.PAXSENIX] directly. */
+        appleSongId: String? = null,
+        /** True when this is an Apple row, even if its catalogue id is absent. */
+        strictApple: Boolean = false,
     ): Result? = coroutineScope {
-        val sequence = (order + LyricsSource.offered)
-            .distinct()
-            .filter { it in sources && !it.hidden }
+        val directAppleSongId = appleSongId?.trim()?.takeIf { it.isNotEmpty() }
+        // An Apple row already names the recording. Ask only the direct
+        // Apple-id route: a title/artist or ISRC lookup would be a duplicate
+        // lookup that can attach words to the wrong recording. An Apple row
+        // with no catalogue id cannot be looked up at all; guessing by name
+        // would break the same identity rule.
+        val sequence = when {
+            directAppleSongId != null -> listOf(LyricsSource.PAXSENIX)
+            strictApple -> emptyList()
+            else -> (order + LyricsSource.offered)
+                .distinct()
+                .filter { it in sources && !it.hidden }
+        }
 
         // Every source but [SimpMusicLyrics] is asked for a name, and
         // YouTube's is not the name anyone catalogued. Cleaned once, here,
@@ -120,7 +134,7 @@ object LyricsRepository {
         // name the recording does. What the caller knows beats what we worked
         // out last time, and both beat asking again.
         val known = isrc?.takeIf { it.isNotBlank() } ?: isrcs[videoId]
-        val hit = if (known == null) {
+        val hit = if (known == null && directAppleSongId == null && !strictApple) {
             identify(videoId, searchTitle, searchArtist, durationMs, album, sequence)
         } else {
             null
@@ -145,6 +159,7 @@ object LyricsRepository {
                         recording,
                         hit,
                         documents::get,
+                        appleSongId,
                     )?.let { result(source, it) }
                     onSourceResult?.invoke(source, found)
                     found
@@ -192,6 +207,7 @@ object LyricsRepository {
         hit: BiniLyrics.Hit?,
         /** Fetches a document once per lookup, however many sources want it. */
         get: suspend (String) -> String?,
+        appleSongId: String?,
     ): List<LyricLine>? {
         val found = when (source) {
             LyricsSource.LRC_RED -> LrcRed.lyrics(title, artist, durationMs, isrc, get)
@@ -209,7 +225,15 @@ object LyricsRepository {
             LyricsSource.YOUTUBE_MUSIC -> YouTubeMusicLyrics.lyrics(videoId)
             LyricsSource.LRCLIB -> LrcLib.lyrics(title, artist, durationMs)
             LyricsSource.MUSIXMATCH -> Musixmatch.lyrics(title, artist, durationMs)
-            LyricsSource.PAXSENIX -> PaxSenix.lyrics(title, artist, durationMs, album)
+            LyricsSource.PAXSENIX -> fetchPaxSenix(
+                appleSongId = appleSongId,
+                title = title,
+                artist = artist,
+                durationMs = durationMs,
+                album = album,
+                byId = PaxSenix::lyricsById,
+                byName = PaxSenix::lyrics,
+            )
             LyricsSource.PAXSENIX_SPOTIFY -> PaxSenix.spotifyLyrics(title, artist, durationMs)
             LyricsSource.PAXSENIX_MUSIXMATCH -> PaxSenix.musixmatchLyrics(title, artist, durationMs)
             LyricsSource.KUGOU -> KuGou.lyrics(title, artist, durationMs, album)
@@ -218,6 +242,23 @@ object LyricsRepository {
             LyricsSource.EXTENSION -> extensionProvider?.lyrics(title, artist, album, durationMs)
         }
         return found
+    }
+
+    /**
+     * PaxSenix uses a known Apple song id when one is available and otherwise
+     * keeps its existing title/artist catalogue-search route.
+     */
+    internal suspend fun fetchPaxSenix(
+        appleSongId: String?,
+        title: String,
+        artist: String,
+        durationMs: Long,
+        album: String?,
+        byId: suspend (String) -> List<LyricLine>?,
+        byName: suspend (String, String, Long, String?) -> List<LyricLine>?,
+    ): List<LyricLine>? {
+        val id = appleSongId?.trim()?.takeIf(String::isNotEmpty)
+        return if (id != null) byId(id) else byName(title, artist, durationMs, album)
     }
 
     /**

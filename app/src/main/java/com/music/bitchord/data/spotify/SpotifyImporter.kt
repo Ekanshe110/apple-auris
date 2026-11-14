@@ -217,7 +217,7 @@ object SpotifyImporter {
         // (see [MusicSource.search]), so a hit here is directly playable and
         // needs no substitution at play time: the queue entry points at the
         // source that answered.
-        for (source in SourceRegistry.activeForPlayback()) {
+        for (source in SourceRegistry.activeForGenericPlayback()) {
             if (source.kind == SourceKind.YOUTUBE) continue
             for (ask in queries) {
                 val rows = runCatching { source.search(ask, limit = SOURCE_MATCH_ROWS) }

@@ -141,6 +141,14 @@ data class Song(    val videoId: String,
      * from an artist name, title or genre.
      */
     val genAi: GenAiDisclosure = GenAiDisclosure.NONE,
+    /**
+     * Apple's catalogue song id for this row, when the source supplied one.
+     *
+     * This is separate from [videoId]: an authenticated library track may use
+     * an addon-specific stream token for playback while carrying Apple's
+     * catalogue id for lyrics. The two ids are never interchangeable.
+     */
+    val appleCatalogId: String? = null,
 ) {
     /** Legacy derived property: true if and only if [queueTier] is [QueueTier.AUTOPLAY]. */
     val fromAutoplay: Boolean get() = queueTier == QueueTier.AUTOPLAY
@@ -171,6 +179,7 @@ data class Song(    val videoId: String,
         playbackSource: String? = null,
         playbackSourceType: PlaybackSourceType? = null,
         playbackSourceId: String? = null,
+        appleCatalogId: String? = null,
     ) : this(
         videoId = videoId,
         title = title,
@@ -197,6 +206,7 @@ data class Song(    val videoId: String,
         playbackSource = playbackSource,
         playbackSourceType = playbackSourceType,
         playbackSourceId = playbackSourceId,
+        appleCatalogId = appleCatalogId,
     )
 }
 

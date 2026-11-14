@@ -1,5 +1,9 @@
 package com.music.bitchord
 
+import com.music.bitchord.data.sources.SourceCatalogRole
+import com.music.bitchord.data.sources.SourceConfig
+import com.music.bitchord.data.sources.SourceKind
+import com.music.bitchord.data.sources.SourceRegistry
 import com.music.bitchord.playback.PlaybackFallback
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -56,6 +60,30 @@ class PlaybackFallbackTest {
                 substitutedYouTube = false,
             ),
         )
+    }
+
+    @Test
+    fun `Apple source failure never falls back to metadata matched YouTube`() {
+        val previous = SourceRegistry.configs.value
+        try {
+            SourceRegistry.configs.value = listOf(
+                SourceConfig(
+                    id = "apple-config",
+                    kind = SourceKind.ADDON,
+                    baseUrl = "https://apple.invalid",
+                    catalogRole = SourceCatalogRole.APPLE_MUSIC,
+                ),
+            )
+
+            assertFalse(
+                PlaybackFallback.isAlternative(
+                    "bitchord://source?s=apple-config&t=3919244&n=Bin%20Tere",
+                    substitutedYouTube = false,
+                ),
+            )
+        } finally {
+            SourceRegistry.configs.value = previous
+        }
     }
 
     @Test

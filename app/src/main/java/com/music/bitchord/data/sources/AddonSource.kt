@@ -192,20 +192,37 @@ class AddonSource(
         limit: Int,
         waitForAll: Boolean,
         request: StreamRequest?,
-    ): List<Song> =
-        withContext(Dispatchers.IO) {
-            if (query.isBlank()) return@withContext emptyList()
-            if (!admitted("a search")) return@withContext emptyList()
-            val tier = request?.tier ?: AddonClient.TIER_LOSSLESS
-            // The immersive mix is asked for on the search too, when the
-            // request wants it: a catalogue that publishes the spatial mix as
-            // its own row offers it as a row or not at all, and a search that
-            // did not ask would never bring it back to be preferred.
-            val wantsAtmos = request != null && atmosWanted(request)
-            val tracks = client.search(query, tier, wantsAtmos).getOrElse { failure ->
-                TrackLog.w(TAG, "${config.displayName}: search failed — ${failure.message}")
-                return@withContext emptyList()
-            }
+    ): List<Song> = searchResult(query, limit, request).getOrElse { failure ->
+        TrackLog.w(TAG, "${config.displayName}: search failed — ${failure.message}")
+        emptyList()
+    }
+
+    /**
+     * The same search with its failure preserved.
+     *
+     * The ordinary [search] contract treats a failed source as no rows because
+     * generic discovery walks several sources and needs one bad server to be
+     * harmless. Apple's strict catalogue route has the opposite requirement: a
+     * failed request is visible failure, never an empty answer that looks like
+     * the account has no matching tracks.
+     */
+    suspend fun searchResult(
+        query: String,
+        limit: Int,
+        request: StreamRequest?,
+    ): Result<List<Song>> = withContext(Dispatchers.IO) {
+        if (query.isBlank()) return@withContext Result.success(emptyList())
+        if (shutOut("a search")) {
+            return@withContext Result.failure(AddonException("Addon is switched off"))
+        }
+        client.manifest().getOrNull()?.let(::recordPolicy)
+        val tier = request?.tier ?: AddonClient.TIER_LOSSLESS
+        // The immersive mix is asked for on the search too, when the
+        // request wants it: a catalogue that publishes the spatial mix as
+        // its own row offers it as a row or not at all, and a search that
+        // did not ask would never bring it back to be preferred.
+        val wantsAtmos = request != null && atmosWanted(request)
+        client.search(query, tier, wantsAtmos).map { tracks ->
             tracks.asSequence()
                 .filter { it.id.isNotBlank() && it.title.isNotBlank() }
                 .take(limit)
@@ -231,10 +248,19 @@ class AddonSource(
                         } else {
                             ModuleSource.qualityTier("${track.audioQuality} ${track.format}")
                         },
+                        // Apple catalogue rows carry Apple's own song id. It is
+                        // also the addon's track id for search results, but the
+                        // library contract keeps catalog and stream ids apart;
+                        // this field is the explicit catalogue identity.
+                        appleCatalogId = track.id.takeIf {
+                            SourceRegistry.config(config.id)?.catalogRole ==
+                                com.music.bitchord.data.sources.SourceCatalogRole.APPLE_MUSIC
+                        },
                     )
                 }
                 .toList()
         }
+    }
 
     // ── Stream ────────────────────────────────────────────────────────────
 

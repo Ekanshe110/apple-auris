@@ -1184,7 +1184,13 @@ object AudioCache {
                 // another server had filled.
                 val alreadyPinned = StreamChoice.of(next)
                     ?.takeIf { !pinnedToYouTube && StreamChoice.isSubstitute(next) }
-                val prepared = alreadyPinned ?: if (substitutable && target != null && !pinnedToYouTube) {
+                val prepared = alreadyPinned ?: if (
+                    substitutable && target != null && !pinnedToYouTube &&
+                    // Apple rows are strict. Their read-ahead must not pin a
+                    // name-matched copy from another source before the exact
+                    // Apple song id has been opened.
+                    !SourceRegistry.isAppleTrack(next)
+                ) {
                     // Announced before the search, not after: the player opens
                     // a queue's next item before it is reached, and that open
                     // reads this to wait for the pin rather than racing YouTube
@@ -1406,6 +1412,11 @@ object AudioCache {
         // an extension had downloaded was prepared against a list that did not
         // contain the extension.
         val serving = SourceRegistry.parseTrackKey(head.mediaId)?.first
+        // Apple downloads are strict too: the local-upgrade path must not
+        // replace their exact Apple recording with a metadata match elsewhere.
+        if (serving != null && SourceRegistry.config(serving)?.catalogRole ==
+            com.music.bitchord.data.sources.SourceCatalogRole.APPLE_MUSIC
+        ) return
         // A bit-exact copy has to be somewhere for the search to be worth
         // starting, and the source the file came from counts towards that
         // whatever rank the listener gave it.

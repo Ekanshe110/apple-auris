@@ -1116,6 +1116,20 @@ private fun BitChordApp(
     val libraryState by viewModel.library.collectAsStateWithLifecycle()
     val filter by viewModel.filter.collectAsStateWithLifecycle()
     val searchSource by viewModel.searchSource.collectAsStateWithLifecycle()
+    val appleCatalogEnabled by AppSettings.appleCatalogEnabled.collectAsStateWithLifecycle()
+    val sourceConfigs by SourceRegistry.configs.collectAsStateWithLifecycle()
+    val visibleSearchSources = buildList {
+        add(SearchSource.YOUTUBE)
+        add(SearchSource.SPOTIFY)
+        add(SearchSource.LIBRARY)
+        if (appleCatalogEnabled && sourceConfigs.any {
+                it.kind == com.music.bitchord.data.sources.SourceKind.ADDON &&
+                    it.enabled && it.isComplete &&
+                    it.catalogRole == com.music.bitchord.data.sources.SourceCatalogRole.APPLE_MUSIC
+            }) {
+            add(SearchSource.APPLE)
+        }
+    }
     val libraryResults by viewModel.libraryResults.collectAsStateWithLifecycle()
     LaunchedEffect(selectedTab) {
         if (selectedTab == TAB_RADIO || showGenres) viewModel.ensureExploreLoaded()
@@ -1465,6 +1479,8 @@ private fun BitChordApp(
                 player.durationMs.takeIf { ms -> ms > 0L } ?: it.durationMillis(),
                 it.albumName,
                 it.localUri,
+                it.appleCatalogId,
+                SourceRegistry.isAppleTrack(it.videoId),
             )
         }
     }
@@ -2718,6 +2734,11 @@ private fun BitChordApp(
         }
         viewModel.setSearchSource(source)
     }
+    LaunchedEffect(searchSource, visibleSearchSources) {
+        if (searchSource == SearchSource.APPLE && searchSource !in visibleSearchSources) {
+            onSearchSourceChange(SearchSource.YOUTUBE)
+        }
+    }
     // The search field's own text and caret — see [NavSearchState.textValue].
     //
     // Kept here, above the bar, because the bar is rebuilt every time it
@@ -2758,14 +2779,13 @@ private fun BitChordApp(
         },
         searchSource = searchSource,
         onToggleSource = {
-            // Three sources, so the button cycles: YouTube, Spotify, the
-            // device's own folder, and round again.
+            // Cycle only through the sources currently offered. Apple is
+            // additive and never displaces Spotify.
             onSearchSourceChange(
-                when (searchSource) {
-                    SearchSource.YOUTUBE -> SearchSource.SPOTIFY
-                    SearchSource.SPOTIFY -> SearchSource.LIBRARY
-                    SearchSource.LIBRARY -> SearchSource.YOUTUBE
-                },
+                visibleSearchSources[
+                    (visibleSearchSources.indexOf(searchSource) + 1)
+                        .coerceAtLeast(0) % visibleSearchSources.size
+                ],
             )
         },
         onTapSearchIcon = {
@@ -5036,6 +5056,8 @@ private fun BitChordApp(
                                         it != com.music.bitchord.data.model.SearchFilter.VIDEOS &&
                                             it != com.music.bitchord.data.model.SearchFilter.PODCASTS
                                     }
+                                searchSource == SearchSource.APPLE ->
+                                    listOf(com.music.bitchord.data.model.SearchFilter.SONGS)
                                 podcastsEnabled -> com.music.bitchord.data.model.SearchFilter.entries
                                 else -> com.music.bitchord.data.model.SearchFilter.entries
                                     .filter { it != com.music.bitchord.data.model.SearchFilter.PODCASTS }
@@ -5174,13 +5196,16 @@ private fun BitChordApp(
                             // app has one look for "pick one of these".
                             sourceSwitcher = {
                                 SegmentedControl(
-                                    options = listOf(
-                                        stringResource(R.string.search_source_youtube),
-                                        stringResource(R.string.search_source_spotify),
-                                        stringResource(R.string.library),
-                                    ),
-                                    selectedIndex = searchSource.ordinal,
-                                    onSelect = { index -> onSearchSourceChange(SearchSource.entries[index]) },
+                                    options = visibleSearchSources.map { source ->
+                                        when (source) {
+                                            SearchSource.YOUTUBE -> stringResource(R.string.search_source_youtube)
+                                            SearchSource.SPOTIFY -> stringResource(R.string.search_source_spotify)
+                                            SearchSource.LIBRARY -> stringResource(R.string.library)
+                                            SearchSource.APPLE -> "Apple Music"
+                                        }
+                                    },
+                                    selectedIndex = visibleSearchSources.indexOf(searchSource).coerceAtLeast(0),
+                                    onSelect = { index -> onSearchSourceChange(visibleSearchSources[index]) },
                                 )
                             },
                             searchingLibrary = searchSource == SearchSource.LIBRARY,

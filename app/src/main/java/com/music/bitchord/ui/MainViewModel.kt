@@ -105,6 +105,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
+import com.music.bitchord.data.sources.AddonSource
 import com.music.bitchord.data.sources.SourceKind
 import com.music.bitchord.data.sources.SourceRegistry
 import com.music.bitchord.data.sources.SourceResolver
@@ -144,6 +145,9 @@ enum class SearchSource {
 
     /** The Local Music folder on this device. */
     LIBRARY,
+
+    /** An explicitly configured Apple Music addon catalogue. */
+    APPLE,
 }
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
@@ -655,6 +659,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val artist: String,
         val durationMs: Long,
         val album: String?,
+        val appleSongId: String?,
+        val strictApple: Boolean,
     )
 
     private var currentLyricsRequest: LyricsRequest? = null
@@ -686,6 +692,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         durationMs: Long,
         album: String? = null,
         localUri: String? = null,
+        appleSongId: String? = null,
+        strictApple: Boolean = false,
     ) {
         val sources = if (AppSettings.syncedLyrics.value) {
             AppSettings.lyricsSources.value
@@ -705,7 +713,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         lyricsFor = key
         lyricsGeneration += 1
         val generation = lyricsGeneration
-        currentLyricsRequest = LyricsRequest(videoId, title, artist, durationMs, album)
+        val resolvedAppleSongId = appleSongId?.trim()?.takeIf { it.isNotEmpty() }
+        currentLyricsRequest = LyricsRequest(
+            videoId,
+            title,
+            artist,
+            durationMs,
+            album,
+            resolvedAppleSongId,
+            strictApple,
+        )
         selectedLyricsSource = null
         manualLyricsJobs.values.forEach(Job::cancel)
         manualLyricsJobs.clear()
@@ -751,6 +768,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     providerFinished(generation, source, result)
                 },
                 onSourceCancelled = { source -> providerCancelled(generation, source) },
+                appleSongId = resolvedAppleSongId,
+                strictApple = strictApple,
             )
             val selected = selectedLyricsSource?.let(lyricsProviderResults::get) ?: found
             _lyrics.value = selected?.lines
@@ -803,6 +822,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     providerFinished(generation, provider, result)
                 },
                 onSourceCancelled = { provider -> providerCancelled(generation, provider) },
+                appleSongId = request.appleSongId,
+                strictApple = request.strictApple,
             )
         }
     }
@@ -2872,6 +2893,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // Music's, and YouTube Music's completions under a Spotify search
         // are answers from the wrong catalogue.
         if (_searchSource.value == SearchSource.SPOTIFY) return
+        // Apple's addon catalogue has its own completion semantics; do not
+        // feed YouTube text completions into an Apple search.
+        if (_searchSource.value == SearchSource.APPLE) return
         // While typing, surface text completions — the pipeline already feeds
         // them through [suggestRequests] and publishes results via typeahead.
         suggestRequests.tryEmit(newValue)
@@ -2911,6 +2935,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 // not honour is a filter that lies: the pill says one thing
                 // and the list answers another.
                 if (_filter.value == SearchFilter.VIDEOS) _filter.value = SearchFilter.ALL
+                submitSearch()
+            }
+            SearchSource.APPLE -> {
+                // The current addon protocol exposes tracks only. A filter the
+                // request cannot honour must not remain selected.
+                _filter.value = SearchFilter.SONGS
                 submitSearch()
             }
         }
@@ -3039,6 +3069,49 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         nextOffset = exact.nextOffset,
                         source = request.source,
                         query = request.query,
+                    )
+                    return@collectLatest
+                }
+
+                // Apple Music is deliberately additive and strict. The
+                // configured Apple addon is asked directly; no Spotify
+                // matcher, converter or YouTube lookup is allowed to turn a
+                // failed Apple request into a different recording.
+                if (request.source == SearchSource.APPLE) {
+                    val config = SourceRegistry.appleCatalogConfig()
+                    val source = config?.let { SourceRegistry.instance(it.id) }
+                    if (source == null) {
+                        if (request.requestId == newestRequestId.get()) {
+                            _results.value = UiState.Error(
+                                "Apple Music catalog is not configured. Mark an enabled addon as the Apple Music catalog source.",
+                            )
+                        }
+                        return@collectLatest
+                    }
+                    val rows: Result<List<Song>> = if (source is AddonSource) {
+                        source.searchResult(request.query, 50, request = null)
+                    } else {
+                        runCatching {
+                            source.search(request.query, 50, waitForAll = false, request = null)
+                        }
+                    }
+                    if (rows.isFailure) {
+                        val failure = rows.exceptionOrNull() ?: IllegalStateException("Apple Music search failed")
+                        if (request.requestId == newestRequestId.get()) {
+                            _results.value = UiState.Error(failure.friendly())
+                        }
+                        return@collectLatest
+                    }
+                    val tracks = rows.getOrThrow()
+                    if (request.requestId != newestRequestId.get()) return@collectLatest
+                    _results.value = publishedRows(
+                        rows = tracks.map { SearchResult.Track(it) },
+                        continuation = null,
+                        nextOffset = null,
+                        key = key,
+                        requestId = request.requestId,
+                        filter = SearchFilter.SONGS,
+                        source = request.source,
                     )
                     return@collectLatest
                 }
@@ -3342,12 +3415,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         filter: SearchFilter,
     ): Pair<List<SearchResult>, List<SearchResult>> = coroutineScope {
         if (filter != SearchFilter.SONGS) return@coroutineScope emptyList<SearchResult>() to emptyList()
-        val active = SourceRegistry.activeForPlayback()
+        val active = SourceRegistry.activeForGenericPlayback()
         val youtubeRank = active.indexOfFirst { it.kind == SourceKind.YOUTUBE }
             .let { if (it < 0) active.size else it }
 
         val answers = active
             .filter { it.kind != SourceKind.YOUTUBE }
+            // Apple rows belong to the explicit Apple catalogue route. They
+            // must not leak into ordinary YouTube search and then be matched
+            // or substituted by the upstream discovery path.
+            .filter {
+                SourceRegistry.config(it.configId)?.catalogRole !=
+                    com.music.bitchord.data.sources.SourceCatalogRole.APPLE_MUSIC
+            }
             .map { source ->
                 source to async {
                     // Per-source, so one slow or unreachable server delays the

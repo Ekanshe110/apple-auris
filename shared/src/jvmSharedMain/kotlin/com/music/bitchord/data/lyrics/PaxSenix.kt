@@ -42,12 +42,31 @@ object PaxSenix {
     ): List<LyricLine>? = withContext(Dispatchers.IO) {
         val id = searchPublicAppleTrackId(title, artist, durationMs)
             ?: return@withContext null
+        fetchLyricsById(id, ::lyricsGet)
+    }
+
+    /**
+     * Lyrics for a known Apple Music song id.
+     *
+     * This route needs no title, artist, duration, catalogue search, or Apple
+     * developer token. The id is encoded as one query parameter before the
+     * request is made.
+     */
+    suspend fun lyricsById(appleSongId: String): List<LyricLine>? = withContext(Dispatchers.IO) {
+        fetchLyricsById(appleSongId, ::lyricsGet)
+    }
+
+    /** Testable direct-route implementation. */
+    internal suspend fun fetchLyricsById(
+        appleSongId: String,
+        get: suspend (String) -> String?,
+    ): List<LyricLine>? {
+        val id = appleSongId.trim().takeIf(String::isNotEmpty) ?: return null
         val url = publicUrl("apple-music/lyrics")
             .addQueryParameter("id", id)
             .addQueryParameter("ttml", "true")
             .build()
-        lyricsGet(url.toString())
-            ?.let(::parseResponse)
+        return get(url.toString())?.let(::parseResponse)
     }
 
     suspend fun spotifyLyrics(

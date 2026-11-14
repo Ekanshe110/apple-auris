@@ -343,6 +343,8 @@ fun ServerEditorAlert(
     /** Offered only when there is something stored to remove. */
     onRemove: (() -> Unit)? = null,
     onDismiss: () -> Unit,
+    /** Optional controls shown below the editor fields. */
+    extraContent: @Composable () -> Unit = {},
 ) {
     AlertScaffold(hazeState = hazeState, onDismiss = { if (!testing) onDismiss() }) {
         Column(
@@ -393,6 +395,7 @@ fun ServerEditorAlert(
                     )
                 }
             }
+            extraContent()
         }
         AlertRule()
         // Above Save rather than beside it: an address is worth checking before
@@ -570,6 +573,8 @@ fun AddonEditorAlert(
      * it showed before.
      */
     extraFields: List<EditorField> = emptyList(),
+    /** Optional controls shown below the address and credential fields. */
+    extraContent: @Composable () -> Unit = {},
 ) {
     ServerEditorAlert(
         hazeState = hazeState,
@@ -592,6 +597,7 @@ fun AddonEditorAlert(
         removeLabel = removeLabel ?: stringResource(R.string.remove_source),
         onRemove = onRemove,
         onDismiss = onDismiss,
+        extraContent = extraContent,
     )
 }
 

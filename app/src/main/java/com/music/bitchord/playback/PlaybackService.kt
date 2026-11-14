@@ -9472,6 +9472,8 @@ class PlaybackService : MediaLibraryService() {
                     sources = AppSettings.lyricsSources.value,
                     order = AppSettings.lyricsSourceOrder.value,
                     prioritizeSyllableSync = AppSettings.prioritizeSyllableSync.value,
+                    appleSongId = currentSong.appleCatalogId,
+                    strictApple = SourceRegistry.isAppleTrack(currentSong.videoId),
                 )
                 lines = found?.lines
             }

@@ -76,6 +76,11 @@ data class SourceConfig(
      * already break that. Refreshed whenever the manifest is next read.
      */
     val checkValidLossless: Boolean = false,
+    /**
+     * The provider this source speaks for, when it has been explicitly marked
+     * as one. Generic by default so old stored configs keep their old meaning.
+     */
+    val catalogRole: SourceCatalogRole = SourceCatalogRole.GENERIC,
 ) {
     /** Whether this source is shut out right now because it needs an output that isn't connected. */
     val awaitsLosslessOutput: Boolean
@@ -99,9 +104,13 @@ data class SourceConfig(
     val losslessOutputMissing: Boolean
         get() = awaitsLosslessOutput
 
-    /** The two manifest switches, without the parts of the config the user set. */
+    /** The manifest policy and catalogue role, without the parts of the config the user set. */
     internal fun withPolicyOf(other: SourceConfig) =
-        copy(allowDownloads = other.allowDownloads, checkValidLossless = other.checkValidLossless)
+        copy(
+            allowDownloads = other.allowDownloads,
+            checkValidLossless = other.checkValidLossless,
+            catalogRole = other.catalogRole,
+        )
 
     /** What the sources screen and the player show. Never blank. */
     val displayName: String
@@ -233,7 +242,23 @@ object SourceRegistry {
                     config
                 }
             }
-        return stampStock(migrated)
+        // At most one source may hold the Apple catalogue role. Normalize on
+        // load as well as on edit so a hand-edited or corrupted preference
+        // file cannot leave two addons claiming the same native song ids.
+        var appleRoleSeen = false
+        val normalized = migrated.map { config ->
+            if (config.kind != SourceKind.ADDON) {
+                config.copy(catalogRole = SourceCatalogRole.GENERIC)
+            } else if (config.catalogRole != SourceCatalogRole.APPLE_MUSIC) {
+                config
+            } else if (appleRoleSeen) {
+                config.copy(catalogRole = SourceCatalogRole.GENERIC)
+            } else {
+                appleRoleSeen = true
+                config
+            }
+        }
+        return stampStock(normalized)
     }
 
     /**
@@ -294,6 +319,10 @@ object SourceRegistry {
     fun activeForDownload(): List<MusicSource> =
         active().filter { config(it.configId)?.allowDownloads != false }
 
+    /** Download sources eligible for metadata matching; exact Apple rows are excluded. */
+    fun activeForGenericDownload(): List<MusicSource> =
+        activeForDownload().filterNot { isAppleRole(it.configId) }
+
     /**
      * Records what an addon's manifest said about downloads and lossless
      * output, if it changed.
@@ -338,6 +367,19 @@ object SourceRegistry {
         return active().filter { ceiling.permits(it.kind) }
     }
 
+    /**
+     * Sources eligible for metadata matching and cross-source substitution.
+     *
+     * An explicitly Apple source is excluded: it serves exact Apple song ids
+     * only and must never be found by title, artist or duration.
+     */
+    fun activeForGenericPlayback(): List<MusicSource> =
+        activeForPlayback().filterNot { isAppleRole(it.configId) }
+
+    /** Whether [configId] is the explicitly configured Apple Music source. */
+    fun isAppleRole(configId: String): Boolean =
+        config(configId)?.catalogRole == SourceCatalogRole.APPLE_MUSIC
+
     fun instance(configId: String): MusicSource? = instances[configId]
 
     fun config(configId: String): SourceConfig? = configs.value.firstOrNull { it.id == configId }
@@ -365,8 +407,20 @@ object SourceRegistry {
      * theirs, so it must stay removable and keep its own name however its
      * protocol happens to be recognised.
      */
-    fun add(config: SourceConfig) =
-        publish(configs.value + config.tidied().copy(stock = false))
+    fun add(config: SourceConfig) {
+        val added = config.tidied().copy(stock = false)
+        publish(
+            configs.value.map { existing ->
+                if (added.catalogRole == SourceCatalogRole.APPLE_MUSIC &&
+                    existing.catalogRole == SourceCatalogRole.APPLE_MUSIC
+                ) {
+                    existing.copy(catalogRole = SourceCatalogRole.GENERIC)
+                } else {
+                    existing
+                }
+            } + added,
+        )
+    }
 
     /**
      * Saves an edit. Stock-ness is not the editor's to set — it stays whatever
@@ -376,7 +430,17 @@ object SourceRegistry {
     fun update(config: SourceConfig) {
         val current = config(config.id)
         config.tidied().let { tidied ->
-            publish(configs.value.map { if (it.id == tidied.id) tidied.copy(stock = current?.stock ?: false) else it })
+            publish(
+                configs.value.map { existing ->
+                    when {
+                        existing.id == tidied.id -> tidied.copy(stock = current?.stock ?: false)
+                        tidied.catalogRole == SourceCatalogRole.APPLE_MUSIC &&
+                            existing.catalogRole == SourceCatalogRole.APPLE_MUSIC ->
+                            existing.copy(catalogRole = SourceCatalogRole.GENERIC)
+                        else -> existing
+                    }
+                },
+            )
         }
     }
 
@@ -391,8 +455,11 @@ object SourceRegistry {
      * Normalising here rather than in the editor keeps it true for every caller
      * and not just the one with a text field.
      */
-    private fun SourceConfig.tidied(): SourceConfig =
-        if (kind == SourceKind.ADDON) copy(baseUrl = AddonClient.normalizeBase(baseUrl)) else this
+    private fun SourceConfig.tidied(): SourceConfig = when {
+        kind == SourceKind.ADDON -> copy(baseUrl = AddonClient.normalizeBase(baseUrl))
+        catalogRole != SourceCatalogRole.GENERIC -> copy(catalogRole = SourceCatalogRole.GENERIC)
+        else -> this
+    }
 
     fun remove(configId: String) {
         val target = config(configId) ?: return
@@ -423,6 +490,44 @@ object SourceRegistry {
      */
     fun setEnabled(configId: String, enabled: Boolean) {
         publish(configs.value.map { if (it.id == configId) it.copy(enabled = enabled) else it })
+    }
+
+    /**
+     * Marks one addon as the Apple Music catalogue, or clears that role.
+     *
+     * Only one addon may hold the role. Otherwise the same search term could
+     * silently answer from different accounts, and the stored Apple song id
+     * would stop naming one recording.
+     */
+    fun setCatalogRole(configId: String, role: SourceCatalogRole) {
+        val target = config(configId) ?: return
+        if (target.kind != SourceKind.ADDON) return
+        publish(
+            configs.value.map { config ->
+                when {
+                    config.id == configId -> config.copy(catalogRole = role)
+                    role == SourceCatalogRole.APPLE_MUSIC &&
+                        config.catalogRole == SourceCatalogRole.APPLE_MUSIC ->
+                        config.copy(catalogRole = SourceCatalogRole.GENERIC)
+                    else -> config
+                }
+            },
+        )
+    }
+
+    /** The enabled Apple Music addon, chosen in the user's source order. */
+    fun appleCatalogConfig(): SourceConfig? =
+        configs.value.firstOrNull {
+            it.kind == SourceKind.ADDON &&
+                it.enabled &&
+                it.isComplete &&
+                it.catalogRole == SourceCatalogRole.APPLE_MUSIC
+        }
+
+    /** Whether [mediaId] names a track from the explicitly configured Apple source. */
+    fun isAppleTrack(mediaId: String): Boolean {
+        val parsed = parseTrackKey(mediaId) ?: return false
+        return isAppleRole(parsed.first)
     }
 
     /**

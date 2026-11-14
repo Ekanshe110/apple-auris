@@ -2,6 +2,7 @@ package com.music.bitchord.playback
 
 import android.os.Bundle
 import androidx.media3.common.MediaItem
+import com.music.bitchord.data.sources.SourceRegistry
 
 /**
  * The one-way escape from a higher-quality source that failed after it had
@@ -18,7 +19,14 @@ internal object PlaybackFallback {
     /** Whether [uri] is currently allowed to resolve to something above YouTube. */
     fun isAlternative(uri: String, substitutedYouTube: Boolean): Boolean {
         if (parameter(uri, DIRECT_YOUTUBE_PARAMETER) == "1") return false
-        if (uri.substringBefore('?').substringBefore('#') == "bitchord://source") return true
+        if (uri.substringBefore('?').substringBefore('#') == "bitchord://source") {
+            // Apple source rows name one recording on one addon. A failed
+            // stream is a failure, not permission to replace that recording
+            // with a metadata-matched YouTube upload.
+            val configId = parameter(uri, "s")
+            if (configId != null && SourceRegistry.isAppleRole(configId)) return false
+            return true
+        }
         val rendition = parameter(uri, QualityUpgrade.MARKER)
         return substitutedYouTube || rendition == "hifi" || rendition?.startsWith("hifi-") == true
     }

@@ -7,6 +7,7 @@ import com.music.bitchord.data.lyrics.toLrc
 import com.music.bitchord.data.model.Song
 import com.music.bitchord.data.model.durationMillis
 import com.music.bitchord.data.settings.AppSettings
+import com.music.bitchord.data.sources.SourceRegistry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -85,6 +86,8 @@ internal object LyricsTag {
                     sources = sources,
                     order = AppSettings.lyricsSourceOrder.value,
                     prioritizeSyllableSync = AppSettings.prioritizeSyllableSync.value,
+                    appleSongId = track.appleCatalogId,
+                    strictApple = SourceRegistry.isAppleTrack(track.videoId),
                 )
             }
         } catch (e: CancellationException) {

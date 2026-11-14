@@ -156,12 +156,26 @@ object SourceResolver {
     ): SourceStream? {
         val request = requestForNow()
         val active = SourceRegistry.activeForPlayback()
+        val appleRole = SourceRegistry.config(configId)?.catalogRole ==
+            com.music.bitchord.data.sources.SourceCatalogRole.APPLE_MUSIC
+        if (appleRole) {
+            // Apple rows are strict by contract. Their song id names one
+            // recording on one Apple addon; a lossless lookup or a failed
+            // stream must never turn it into a Spotify, YouTube or other
+            // addon's recording under the same title.
+            val pinnedApple = active.firstOrNull { it.configId == configId }
+            return pinnedApple?.let {
+                attempt(it) { it.stream(trackId, request) }
+                    ?.copy(sourceConfigId = it.configId)
+            }
+        }
+        val generic = active.filterNot { SourceRegistry.isAppleRole(it.configId) }
         // A pin identifies where the row originally came from; it does not
         // override the source switch. Looking the instance up directly used to
         // reopen disabled JioSaavn/addon tracks already sitting in the queue.
         // Resolve the pin only from the enabled list so Off means off for both
         // newly matched tracks and source-backed rows queued earlier.
-        val pinned = active.firstOrNull { it.configId == configId }
+        val pinned = generic.firstOrNull { it.configId == configId }
 
         // The upgrade path: with lossless asked for and the pinned source
         // unable to serve it, anything ranked above it that can is worth
@@ -169,7 +183,7 @@ object SourceResolver {
         // what makes "my own FLAC of this, if I have one, else stream it"
         // expressible.
         if (request.wantsLossless && pinned?.kind?.canServeLossless != true) {
-            for (source in rankedAbove(configId, active)) {
+            for (source in rankedAbove(configId, generic)) {
                 if (!source.kind.canServeLossless) continue
                 // The length bar, as everywhere a recording is swapped for
                 // another one: a replacement has to be the same recording, and
@@ -215,7 +229,7 @@ object SourceResolver {
         // and a call to be told what was already known — that it cannot.
         val (fallbackSource, stream) =
             bestAcross(
-                active.filterNot { it.configId == configId }.filter { it.servesAudio },
+                generic.filterNot { it.configId == configId }.filter { it.servesAudio },
                 target,
                 request,
                 // A fallback is a substitution: this track's own source failed,
@@ -260,7 +274,7 @@ object SourceResolver {
         // explicitly converts the current item in the player. A module match
         // is another recording and can be a wrong song altogether.
         if (target.title.isBlank() || target.isVideo) return null
-        val candidates = candidatesForYouTube(SourceRegistry.activeForPlayback())
+        val candidates = candidatesForYouTube(SourceRegistry.activeForGenericPlayback())
         if (candidates.isEmpty()) return null
         val request = requestForNow()
         // A substitution, and so held to the length: what plays in place of
@@ -336,7 +350,7 @@ object SourceResolver {
      */
     suspend fun prefetchSubstitute(target: TrackMatcher.Target): SourceStream? {
         if (target.title.isBlank() || target.isVideo) return null
-        val quick = candidatesForYouTube(SourceRegistry.activeForPlayback())
+        val quick = candidatesForYouTube(SourceRegistry.activeForGenericPlayback())
             .filter { it.kind.worthPrefetching }
         if (quick.isEmpty()) return null
         // A substitution, and so held to the length: see [substituteForYouTube].
@@ -392,7 +406,7 @@ object SourceResolver {
         servedBy: String? = null,
     ): SourceStream? {
         if (target.title.isBlank() || target.isVideo) return null
-        val active = SourceRegistry.activeForPlayback()
+        val active = SourceRegistry.activeForGenericPlayback()
         val pool = upgradeCandidates(
             candidates = candidatesForYouTube(active),
             active = active,
@@ -479,6 +493,13 @@ object SourceResolver {
                     )
                     return stream
                 }
+            }
+            if (SourceRegistry.config(configId)?.catalogRole ==
+                com.music.bitchord.data.sources.SourceCatalogRole.APPLE_MUSIC
+            ) {
+                // An Apple recording may not be replaced by a name-matched
+                // recording from another source.
+                return null
             }
         }
 
@@ -570,10 +591,20 @@ object SourceResolver {
          * still honoured. See [worthSwapping].
          */
         explicit: () -> Boolean = { false },
+        strictConfigId: String? = null,
+        strictTrackId: String? = null,
     ): SourceStream? {
         if (target.title.isBlank() || target.durationSec == null || target.isVideo) return null
         val request = requestForNow()
         val active = SourceRegistry.activeForPlayback()
+        if (strictConfigId != null && strictTrackId != null &&
+            SourceRegistry.config(strictConfigId)?.catalogRole ==
+            com.music.bitchord.data.sources.SourceCatalogRole.APPLE_MUSIC
+        ) {
+            val exact = active.firstOrNull { it.configId == strictConfigId } ?: return null
+            return attempt(exact) { exact.stream(strictTrackId, request) }
+                ?.copy(sourceConfigId = exact.configId)
+        }
         val pool = upgradeCandidates(
             candidates = candidatesForYouTube(active),
             active = active,
@@ -737,7 +768,7 @@ object SourceResolver {
         // has no business deciding that a file saved over Wi-Fi later is a
         // YouTube one. Minus any addon whose manifest says `allowDownloads: 0`:
         // that one plays, but the file comes from whoever is next in line.
-        val active = SourceRegistry.activeForDownload()
+        val active = SourceRegistry.activeForGenericDownload()
         // An absent YouTube means every enabled source outranks it, which is
         // already what [rankedAbove] says about a config that isn't in the
         // list. What an absent YouTube changes is the end of the walk: the
@@ -969,7 +1000,7 @@ object SourceResolver {
      * is exactly the statement that YouTube's stream is the one not to use.
      */
     fun canSubstituteForYouTube(): Boolean =
-        candidatesForYouTube(SourceRegistry.activeForPlayback()).isNotEmpty()
+        candidatesForYouTube(SourceRegistry.activeForGenericPlayback()).isNotEmpty()
 
     /**
      * Whether anything enabled can hand over a bit-exact copy of a track.
@@ -992,7 +1023,7 @@ object SourceResolver {
      *   the extension held the FLAC, and the question was never asked.
      */
     fun canServeLossless(alsoConfigId: String? = null): Boolean {
-        val active = SourceRegistry.activeForPlayback()
+        val active = SourceRegistry.activeForGenericPlayback()
         return losslessAvailable(candidatesForYouTube(active), active, alsoConfigId)
     }
 
@@ -1068,13 +1099,19 @@ object SourceResolver {
         reaskServedBy: Boolean,
     ): List<MusicSource> {
         if (!reaskServedBy) {
-            return candidates.filterNot { it.configId == servedBy }
+            return candidates.filterNot {
+                it.configId == servedBy || SourceRegistry.isAppleRole(it.configId)
+            }
         }
         // The serving source is put back only if it can serve audio at all: a
         // metadata-only extension answers a search with a catalogue and cannot
         // hand over a stream, so asking it again would spend a search to be
         // told what was already known.
-        val serving = servedBy?.let { id -> active.firstOrNull { it.configId == id && it.servesAudio } }
+        val serving = servedBy?.let { id ->
+            active.firstOrNull {
+                it.configId == id && it.servesAudio && !SourceRegistry.isAppleRole(it.configId)
+            }
+        }
         return if (serving != null && serving !in candidates) candidates + serving else candidates
     }
 
@@ -1096,7 +1133,7 @@ object SourceResolver {
     internal fun candidatesForYouTube(active: List<MusicSource>): List<MusicSource> {
         val at = active.indexOfFirst { it.kind == SourceKind.YOUTUBE }
         val ranked = if (at < 0) active else active.take(at)
-        return ranked.filter { it.servesAudio }
+        return ranked.filter { it.servesAudio && !SourceRegistry.isAppleRole(it.configId) }
     }
 
     /**
