@@ -670,6 +670,14 @@ private fun AppRootBox(content: @Composable BoxScope.() -> Unit) {
     }
 }
 
+/** Search sources offered for the current Apple catalogue configuration. */
+private fun visibleSearchSources(appleCatalogReady: Boolean): List<SearchSource> = buildList {
+    add(SearchSource.YOUTUBE)
+    add(SearchSource.SPOTIFY)
+    add(SearchSource.LIBRARY)
+    if (appleCatalogReady) add(SearchSource.APPLE)
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun BitChordApp(
@@ -1118,20 +1126,18 @@ private fun BitChordApp(
     val libraryState by viewModel.library.collectAsStateWithLifecycle()
     val filter by viewModel.filter.collectAsStateWithLifecycle()
     val searchSource by viewModel.searchSource.collectAsStateWithLifecycle()
-    val appleCatalogEnabled by AppSettings.appleCatalogEnabled.collectAsStateWithLifecycle()
-    val sourceConfigs by SourceRegistry.configs.collectAsStateWithLifecycle()
-    val visibleSearchSources = buildList {
-        add(SearchSource.YOUTUBE)
-        add(SearchSource.SPOTIFY)
-        add(SearchSource.LIBRARY)
-        if (appleCatalogEnabled && sourceConfigs.any {
+    // Keep this as one captured value. The root composable already sits close
+    // to dex's 255-register constructor limit, so collecting the toggle and
+    // source list separately would add avoidable captures to nested lambdas.
+    val appleCatalogReady by remember {
+        derivedStateOf {
+            AppSettings.appleCatalogEnabled.value && SourceRegistry.configs.value.any {
                 it.kind == com.music.bitchord.data.sources.SourceKind.ADDON &&
                     it.enabled && it.isComplete &&
                     it.catalogRole == com.music.bitchord.data.sources.SourceCatalogRole.APPLE_MUSIC
-            }) {
-            add(SearchSource.APPLE)
+            }
         }
-    }
+    }.collectAsStateWithLifecycle()
     val libraryResults by viewModel.libraryResults.collectAsStateWithLifecycle()
     LaunchedEffect(selectedTab) {
         if (selectedTab == TAB_RADIO || showGenres) viewModel.ensureExploreLoaded()
@@ -2737,8 +2743,8 @@ private fun BitChordApp(
         }
         viewModel.setSearchSource(source)
     }
-    LaunchedEffect(searchSource, visibleSearchSources) {
-        if (searchSource == SearchSource.APPLE && searchSource !in visibleSearchSources) {
+    LaunchedEffect(searchSource, appleCatalogReady) {
+        if (searchSource == SearchSource.APPLE && searchSource !in visibleSearchSources(appleCatalogReady)) {
             onSearchSourceChange(SearchSource.YOUTUBE)
         }
     }
@@ -2784,10 +2790,11 @@ private fun BitChordApp(
         onToggleSource = {
             // Cycle only through the sources currently offered. Apple is
             // additive and never displaces Spotify.
+            val currentSources = visibleSearchSources(appleCatalogReady)
             onSearchSourceChange(
-                visibleSearchSources[
-                    (visibleSearchSources.indexOf(searchSource) + 1)
-                        .coerceAtLeast(0) % visibleSearchSources.size
+                currentSources[
+                    (currentSources.indexOf(searchSource) + 1)
+                        .coerceAtLeast(0) % currentSources.size
                 ],
             )
         },
@@ -5230,8 +5237,9 @@ private fun BitChordApp(
                             // The settings page's own two-state selector, so the
                             // app has one look for "pick one of these".
                             sourceSwitcher = {
+                                val currentSources = visibleSearchSources(appleCatalogReady)
                                 SegmentedControl(
-                                    options = visibleSearchSources.map { source ->
+                                    options = currentSources.map { source ->
                                         when (source) {
                                             SearchSource.YOUTUBE -> stringResource(R.string.search_source_youtube)
                                             SearchSource.SPOTIFY -> stringResource(R.string.search_source_spotify)
@@ -5239,8 +5247,8 @@ private fun BitChordApp(
                                             SearchSource.APPLE -> "Apple Music"
                                         }
                                     },
-                                    selectedIndex = visibleSearchSources.indexOf(searchSource).coerceAtLeast(0),
-                                    onSelect = { index -> onSearchSourceChange(visibleSearchSources[index]) },
+                                    selectedIndex = currentSources.indexOf(searchSource).coerceAtLeast(0),
+                                    onSelect = { index -> onSearchSourceChange(currentSources[index]) },
                                 )
                             },
                             searchingLibrary = searchSource == SearchSource.LIBRARY,
