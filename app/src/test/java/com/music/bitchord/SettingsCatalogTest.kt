@@ -116,7 +116,7 @@ class SettingsCatalogTest {
         val required = listOf(
             "pass.card",
             "account.integrations", "account.listen_together",
-            "audio.source", "audio.offline_mode", "audio.wifi", "audio.mobile_data",
+            "audio.source", "audio.apple_catalog", "audio.offline_mode", "audio.wifi", "audio.mobile_data",
             "audio.output_precision", "audio.bit_perfect", "audio.prefer_usb_dac",
             "audio.loudness_normalization", "audio.loudness_off_on_speaker",
             "audio.seamless_quality_upgrades", "audio.auto_upgrade_local_storage",

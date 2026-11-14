@@ -23,7 +23,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -165,6 +164,7 @@ import com.music.bitchord.data.NerdStats
 import com.music.bitchord.data.scrobbling.LastFM
 import com.music.bitchord.data.listentogether.ListenTogether
 import com.music.bitchord.data.settings.AppSettings
+import com.music.bitchord.data.settings.settingsScrollRestoreOffset
 import com.music.bitchord.ui.theme.AppFonts
 import com.music.bitchord.data.settings.OutputPcmMode
 import com.music.bitchord.playback.AudioOutputStatus
@@ -282,6 +282,7 @@ fun SettingsScreen(
     val swipeToPlayNext by AppSettings.swipeToPlayNext.collectAsStateWithLifecycle()
     val dontRepeatSuggestions by AppSettings.dontRepeatSuggestions.collectAsStateWithLifecycle()
     val preferMusicOnly by AppSettings.preferMusicOnly.collectAsStateWithLifecycle()
+    val appleCatalogEnabled by AppSettings.appleCatalogEnabled.collectAsStateWithLifecycle()
     val smartVersionAlignment by AppSettings.smartVersionAlignment.collectAsStateWithLifecycle()
     val filterNonMusicAudio by AppSettings.filterNonMusicAudio.collectAsStateWithLifecycle()
     val localMusicFolderUri by AppSettings.localMusicFolderUri.collectAsStateWithLifecycle()
@@ -442,18 +443,11 @@ fun SettingsScreen(
     // offset that belonged to one of them means nothing in another.
     val scrollPage = openCategory?.id ?: SETTINGS_INDEX_PAGE
     // A fresh scroll state per page, so one page's offset never carries into
-    // another.
-    val scrollState = rememberSaveable(scrollPage, saver = ScrollState.Saver) { ScrollState(0) }
-    // Where this page was left the last time it was closed.
-    val restoredOffset = remember(scrollPage) { AppSettings.settingsScrollOffset(scrollPage) }
-    // Restored once the page has been measured: a scroll state cannot hold an
-    // offset its content has not got yet, so asking for it before the first
-    // layout would land on zero — which is exactly what the page did before
-    // this, every time it was opened.
-    LaunchedEffect(scrollState, scrollPage, searchQuery) {
-        if (restoredOffset <= 0 || searchQuery.isNotBlank()) return@LaunchedEffect
-        snapshotFlow { scrollState.maxValue }.first { it > 0 }
-        scrollState.scrollTo(restoredOffset.coerceAtMost(scrollState.maxValue))
+    // another. Seed it with the durable page offset: the first composition
+    // must already be at the place the listener left, rather than briefly
+    // showing the top and moving there afterwards.
+    val scrollState = rememberSaveable(scrollPage, saver = ScrollState.Saver) {
+        ScrollState(AppSettings.settingsScrollOffset(scrollPage))
     }
     // Written out as the listener scrolls, so the place survives the app
     // being closed rather than only a page change. Debounced, because a drag
@@ -485,9 +479,16 @@ fun SettingsScreen(
             isFirstSearchComposition = false
             if (searchQuery.isEmpty()) {
                 // The page's own list is back, so its own place in it applies.
+                // Wait for that list to have a scrollable extent first; a
+                // zero maxValue means the old search results are still the
+                // content being measured, and restoring now would lose the
+                // durable offset.
+                snapshotFlow { scrollState.maxValue }.first { it > 0 }
                 scrollState.scrollTo(
-                    AppSettings.settingsScrollOffset(scrollPage)
-                        .coerceAtMost(scrollState.maxValue),
+                    settingsScrollRestoreOffset(
+                        AppSettings.settingsScrollOffset(scrollPage),
+                        scrollState.maxValue,
+                    ),
                 )
             } else {
                 // What is left after a keystroke is a different list, and the
@@ -601,6 +602,23 @@ fun SettingsScreen(
                     title = sourceTitle,
                     subtitle = sourceSubtitle,
                     onClick = onSources,
+                )
+            }
+            row("Use Apple Music catalog", "apple music", "catalog") {
+                SettingsRow(
+                    icon = Icons.Rounded.LibraryMusic,
+                    title = "Use Apple Music catalog",
+                    trailing = {
+                        Switch(
+                            checked = appleCatalogEnabled,
+                            onCheckedChange = AppSettings::setAppleCatalogEnabled,
+                            colors = SwitchDefaults.colors(
+                                checkedTrackColor = MaterialTheme.colorScheme.primary,
+                                checkedBorderColor = MaterialTheme.colorScheme.primary,
+                            ),
+                        )
+                    },
+                    onClick = { AppSettings.setAppleCatalogEnabled(!appleCatalogEnabled) },
                 )
             }
             // Sits here because it overrides what the two rows beneath decide,

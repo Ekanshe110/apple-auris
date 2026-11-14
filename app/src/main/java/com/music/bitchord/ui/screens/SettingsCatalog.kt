@@ -72,6 +72,7 @@ object SettingsCatalog {
         ),
         SettingsCategory.AUDIO to listOf(
             "audio.source",
+            "audio.apple_catalog",
             "audio.offline_mode",
             "audio.wifi",
             "audio.mobile_data",
