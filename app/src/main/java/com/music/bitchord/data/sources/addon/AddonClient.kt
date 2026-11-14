@@ -31,7 +31,14 @@ import java.util.concurrent.TimeUnit
  * request abandoned after it has already reached somebody's server is work
  * their server did for nobody.
  */
-class AddonClient(rawBaseUrl: String) {
+class AddonClient(
+    rawBaseUrl: String,
+    /**
+     * Optional credential for an addon library endpoint. It is sent only in
+     * the authentication header declared by the manifest, never in the URL.
+     */
+    private val libraryCredential: String? = null,
+) {
 
     /** Where this addon lives, with `/manifest.json` and trailing slashes off. */
     val baseUrl: String = normalizeBase(rawBaseUrl)
@@ -117,6 +124,185 @@ class AddonClient(rawBaseUrl: String) {
     suspend fun probeSearch(): Result<Int> =
         fetch<AddonSearchResponse>(endpoint(listOf("search"), mapOf("q" to PROBE_QUERY)))
             .map { it.tracks.size }
+
+    // ── Library ───────────────────────────────────────────────────────────
+
+    /** Playlists from the authenticated Apple Music library. */
+    suspend fun libraryPlaylists(
+        offset: Int = 0,
+        limit: Int = DEFAULT_LIBRARY_LIMIT,
+    ): Result<AddonLibraryPage> = libraryCollection(
+        AddonLibraryCapability.COLLECTION_PLAYLISTS,
+        offset,
+        limit,
+    )
+
+    /** Albums from the authenticated Apple Music library. */
+    suspend fun libraryAlbums(
+        offset: Int = 0,
+        limit: Int = DEFAULT_LIBRARY_LIMIT,
+    ): Result<AddonLibraryPage> = libraryCollection(
+        AddonLibraryCapability.COLLECTION_ALBUMS,
+        offset,
+        limit,
+    )
+
+    /** Songs from the authenticated Apple Music library. */
+    suspend fun librarySongs(
+        offset: Int = 0,
+        limit: Int = DEFAULT_LIBRARY_LIMIT,
+    ): Result<AddonLibraryPage> = libraryCollection(
+        AddonLibraryCapability.COLLECTION_SONGS,
+        offset,
+        limit,
+    )
+
+    /**
+     * Tracks belonging to one playlist, album, or song collection.
+     *
+     * The collection id is encoded as one path segment. Apple ids can contain
+     * punctuation and an addon id may contain a slash; either must not be able
+     * to rewrite the route.
+     */
+    suspend fun libraryCollectionTracks(
+        collection: String,
+        collectionId: String,
+        offset: Int = 0,
+        limit: Int = DEFAULT_LIBRARY_LIMIT,
+    ): Result<AddonLibraryPage> {
+        val capability = admittedLibraryCapability(collection)
+            .getOrElse { return Result.failure(it) }
+        val headers = libraryHeaders(capability).getOrElse { return Result.failure(it) }
+        val params = pagination(offset, limit).getOrElse { return Result.failure(it) }
+        return fetchLibraryPage(
+            libraryTracksEndpoint(collection, collectionId, params),
+            headers,
+        )
+    }
+
+    /** Tracks belonging to one playlist. */
+    suspend fun libraryPlaylistTracks(
+        playlistId: String,
+        offset: Int = 0,
+        limit: Int = DEFAULT_LIBRARY_LIMIT,
+    ): Result<AddonLibraryPage> = libraryCollectionTracks(
+        AddonLibraryCapability.COLLECTION_PLAYLISTS,
+        playlistId,
+        offset,
+        limit,
+    )
+
+    /** Tracks belonging to one album. */
+    suspend fun libraryAlbumTracks(
+        albumId: String,
+        offset: Int = 0,
+        limit: Int = DEFAULT_LIBRARY_LIMIT,
+    ): Result<AddonLibraryPage> = libraryCollectionTracks(
+        AddonLibraryCapability.COLLECTION_ALBUMS,
+        albumId,
+        offset,
+        limit,
+    )
+
+    /** Tracks belonging to one song collection. */
+    suspend fun librarySongTracks(
+        songId: String,
+        offset: Int = 0,
+        limit: Int = DEFAULT_LIBRARY_LIMIT,
+    ): Result<AddonLibraryPage> = libraryCollectionTracks(
+        AddonLibraryCapability.COLLECTION_SONGS,
+        songId,
+        offset,
+        limit,
+    )
+
+    /** A page from any library collection declared by the manifest. */
+    suspend fun libraryCollection(
+        collection: String,
+        offset: Int = 0,
+        limit: Int = DEFAULT_LIBRARY_LIMIT,
+    ): Result<AddonLibraryPage> {
+        val capability = admittedLibraryCapability(collection)
+            .getOrElse { return Result.failure(it) }
+        val headers = libraryHeaders(capability).getOrElse { return Result.failure(it) }
+        val params = pagination(offset, limit).getOrElse { return Result.failure(it) }
+        return fetchLibraryPage(
+            endpoint(listOf("library", collection), params),
+            headers,
+        )
+    }
+
+    /** The manifest must explicitly advertise this provider and collection. */
+    private suspend fun admittedLibraryCapability(
+        collection: String,
+    ): Result<AddonLibraryCapability> {
+        val manifest = manifest().getOrElse { return Result.failure(it) }
+        val capability = manifest.library
+            ?: return Result.failure(
+                AddonUnsupportedException("This addon does not advertise library support"),
+            )
+        if (!capability.isAppleMusic) {
+            return Result.failure(
+                AddonUnsupportedException("This addon does not advertise the Apple Music library"),
+            )
+        }
+        if (!capability.supportsCollection(collection)) {
+            return Result.failure(
+                AddonUnsupportedException("This addon does not advertise the $collection library collection"),
+            )
+        }
+        return Result.success(capability)
+    }
+
+    /** Build the credential header without ever putting the credential in the query. */
+    private fun libraryHeaders(capability: AddonLibraryCapability): Result<Map<String, String>> {
+        val authentication = capability.authentication
+            ?: return Result.success(emptyMap())
+        val type = authentication.type.lowercase()
+        if (type == AddonLibraryAuthentication.TYPE_NONE) return Result.success(emptyMap())
+        val credential = libraryCredential?.takeIf { it.isNotBlank() }
+        if (credential == null) {
+            if (!authentication.required) return Result.success(emptyMap())
+            return Result.failure(
+                AddonAuthenticationException("missing_credential", "Library credential is required"),
+            )
+        }
+        val header = authentication.header.ifBlank { "Authorization" }
+        val value = when (type) {
+            AddonLibraryAuthentication.TYPE_BEARER -> "Bearer $credential"
+            AddonLibraryAuthentication.TYPE_BASIC -> "Basic $credential"
+            AddonLibraryAuthentication.TYPE_HEADER -> credential
+            else -> return Result.failure(
+                AddonUnsupportedException("Unsupported library authentication type: $type"),
+            )
+        }
+        return Result.success(mapOf(header to value))
+    }
+
+    /** Offset/limit are finite, non-negative contract values, not hints. */
+    private fun pagination(offset: Int, limit: Int): Result<Map<String, String>> {
+        if (offset < 0) {
+            return Result.failure(AddonException("Library offset must be non-negative"))
+        }
+        if (limit <= 0) {
+            return Result.failure(AddonException("Library limit must be positive"))
+        }
+        return Result.success(
+            linkedMapOf("offset" to offset.toString(), "limit" to limit.toString()),
+        )
+    }
+
+    /** An empty 2xx body is an empty page, not a malformed document. */
+    private suspend fun fetchLibraryPage(
+        url: String,
+        headers: Map<String, String>,
+    ): Result<AddonLibraryPage> = runCatching {
+        val text = body(url, headers = headers, allowEmpty = true)
+        json.decodeFromString<AddonLibraryPage>(text.ifBlank { "{}" })
+    }.onFailure { failure ->
+        if (failure is CancellationException) throw failure
+        TrackLog.w(TAG, "  ✗ addon library call failed ${redact(url)}: ${failure.message}")
+    }
 
     // ── Search ────────────────────────────────────────────────────────────
 
@@ -221,6 +407,10 @@ class AddonClient(rawBaseUrl: String) {
         val params = LinkedHashMap<String, String>()
         declared.forEach { setting ->
             val key = setting.key.takeIf { it.isNotBlank() } ?: return@forEach
+            // Secret settings are credentials, not ordinary parameters. They
+            // are never put in a query where they can leak through logs,
+            // proxies, and browser history.
+            if (setting.secret) return@forEach
             setting.defaultValue?.let { params[key] = it }
         }
         if (tier.isNotBlank()) {
@@ -321,6 +511,52 @@ class AddonClient(rawBaseUrl: String) {
         return builder.build().toString()
     }
 
+    /**
+     * Collection-track route with a strictly encoded id.
+     *
+     * OkHttp leaves RFC path sub-delimiters such as `&` readable. They are
+     * legal in a path, but encoding every non-unreserved byte keeps the id
+     * visibly one segment and avoids surprising intermediaries.
+     */
+    private fun libraryTracksEndpoint(
+        collection: String,
+        collectionId: String,
+        params: Map<String, String>,
+    ): String {
+        val base = baseUrl.toHttpUrlOrNull()
+            ?: throw AddonException("That is not a usable address")
+        val builder = base.newBuilder()
+        builder.addPathSegment("library")
+        builder.addPathSegment(collection)
+        builder.addEncodedPathSegment(percentEncodePathSegment(collectionId))
+        builder.addPathSegment("tracks")
+        params.forEach { (key, value) -> builder.addQueryParameter(key, value) }
+        return builder.build().toString()
+    }
+
+    /** Percent-encode everything except RFC 3986 unreserved bytes. */
+    private fun percentEncodePathSegment(value: String): String {
+        val hex = "0123456789ABCDEF"
+        return buildString {
+            value.toByteArray(Charsets.UTF_8).forEach { byte ->
+                val code = byte.toInt() and 0xff
+                if (
+                    code in 'A'.code..'Z'.code ||
+                    code in 'a'.code..'z'.code ||
+                    code in '0'.code..'9'.code ||
+                    code == '-'.code || code == '.'.code ||
+                    code == '_'.code || code == '~'.code
+                ) {
+                    append(code.toChar())
+                } else {
+                    append('%')
+                    append(hex[code shr 4])
+                    append(hex[code and 0x0f])
+                }
+            }
+        }
+    }
+
     private suspend inline fun <reified T> fetch(url: String): Result<T> =
         runCatching { json.decodeFromString<T>(body(url)) }
             .onFailure { failure ->
@@ -347,7 +583,11 @@ class AddonClient(rawBaseUrl: String) {
      * is precisely the miss the caller is equipped to handle and not something
      * to log as a fault.
      */
-    private suspend fun body(url: String): String = withContext(Dispatchers.IO) {
+    private suspend fun body(
+        url: String,
+        headers: Map<String, String> = emptyMap(),
+        allowEmpty: Boolean = false,
+    ): String = withContext(Dispatchers.IO) {
         var attempt = 0
         while (true) {
             (quietUntilMs - System.currentTimeMillis()).takeIf { it > 0 }?.let { delay(it) }
@@ -355,14 +595,23 @@ class AddonClient(rawBaseUrl: String) {
             val request = Request.Builder().url(url)
                 .header("Accept", "application/json")
                 .header("User-Agent", USER_AGENT)
+                .apply { headers.forEach { (name, value) -> header(name, value) } }
                 .build()
 
             val wait = client.newCall(request).execute().use { response ->
+                val responseBody = response.body?.string().orEmpty()
                 when {
                     response.isSuccessful ->
-                        return@withContext response.body?.string()?.takeIf { it.isNotBlank() }
-                            ?: throw AddonException("Empty response")
+                        return@withContext responseBody.takeIf { it.isNotBlank() }
+                            ?: if (allowEmpty) "" else throw AddonException("Empty response")
                     response.code == 404 -> throw AddonNotFound()
+                    response.code == 401 || response.code == 403 -> {
+                        val error = parseErrorBody(responseBody)
+                        val code = error?.code ?: error?.error?.code
+                        val message = error?.error?.message ?: error?.message
+                            ?: "HTTP ${response.code}"
+                        throw AddonAuthenticationException(code, message)
+                    }
                     // A 5xx is a server having a bad minute and will be tried
                     // again on the next track; a 4xx is this app asking for
                     // something it will never be given — a wrong URL, a token
@@ -382,6 +631,12 @@ class AddonClient(rawBaseUrl: String) {
         // Unreachable: every path out of the loop returns or throws.
         @Suppress("UNREACHABLE_CODE")
         throw AddonException("unreachable")
+    }
+
+    /** Read a machine-readable error without requiring the error document to be well formed. */
+    private fun parseErrorBody(text: String): AddonErrorBody? {
+        if (text.isBlank()) return null
+        return runCatching { json.decodeFromString<AddonErrorBody>(text) }.getOrNull()
     }
 
     /** How long to wait after a 429, from the header when it sent one. */
@@ -462,6 +717,9 @@ class AddonClient(rawBaseUrl: String) {
         private val LOW_WORDS = listOf("low", "96", "128", "min")
 
         private const val MANIFEST_SUFFIX = "/manifest.json"
+
+        /** Default number of library objects requested in one page. */
+        const val DEFAULT_LIBRARY_LIMIT = 50
 
         /**
          * A base URL from whatever the user pasted.
@@ -578,7 +836,19 @@ class AddonClient(rawBaseUrl: String) {
  * [SourceHealth.Rejected][com.music.bitchord.data.sources.SourceHealth.Rejected],
  * with a line fit to show a user.
  */
-class AddonException(message: String) : Exception(message)
+open class AddonException(message: String) : Exception(message)
+
+/** The addon does not advertise the requested library provider or collection. */
+class AddonUnsupportedException(message: String) : AddonException(message)
+
+/**
+ * Authentication failed. [code] preserves the addon's machine-readable code,
+ * such as `signed_out`, when the error body supplied one.
+ */
+class AddonAuthenticationException(
+    val code: String?,
+    message: String,
+) : AddonException(message)
 
 /**
  * The addon is momentarily not answering — down, overloaded, rate limiting.

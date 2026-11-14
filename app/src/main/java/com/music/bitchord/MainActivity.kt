@@ -205,6 +205,7 @@ import com.music.bitchord.ui.screens.SourcesScreen
 import com.music.bitchord.data.sources.TrackMatcher
 import com.music.bitchord.auth.SpotifyLoginScreen
 import com.music.bitchord.ui.screens.SpotifyCanvasAuthScreen
+import com.music.bitchord.ui.screens.AppleLibraryScreen
 import com.music.bitchord.ui.screens.SpotifyLibraryScreen
 import com.music.bitchord.data.spotify.SPOTIFY_PAGE_PREFIX
 import com.music.bitchord.playback.AudioCache
@@ -861,6 +862,7 @@ private fun BitChordApp(
     // to cover the tab bar and mini player, which are drawn after it.
     var showDiscord by remember { mutableStateOf(false) }
     var showSpotify by remember { mutableStateOf(false) }
+    var showAppleLibrary by remember { mutableStateOf(false) }
     var showDiscordLogin by remember { mutableStateOf(false) }
     var discordDialog by remember { mutableStateOf<DiscordDialog?>(null) }
     var songActions by remember { mutableStateOf<Song?>(null) }
@@ -1163,6 +1165,7 @@ private fun BitChordApp(
         showFlow = false
         showDiscord = false
         showSpotify = false
+        showAppleLibrary = false
         libraryShowAll = null
         viewModel.clearDetail()
         webSession = null
@@ -2842,6 +2845,10 @@ private fun BitChordApp(
                 showSpotify = true
                 return@let
             }
+            if (id == com.music.bitchord.ui.screens.APPLE_BROWSE_ID) {
+                showAppleLibrary = true
+                return@let
+            }
             // The books are not a YouTube release: their pages are our own,
             // because a chapter is a file rather than a track.
             if (id == com.music.bitchord.ui.screens.AUDIOBOOKS_BROWSE_ID) {
@@ -3336,6 +3343,7 @@ private fun BitChordApp(
                 showFlow = false
                 showDiscord = false
                 showSpotify = false
+                showAppleLibrary = false
                 libraryShowAll = null
 
                 when (sourceType) {
@@ -3478,6 +3486,9 @@ private fun BitChordApp(
         }
         BackHandler(enabled = showSpotify && detail == null) {
             showSpotify = false
+        }
+        BackHandler(enabled = showAppleLibrary && detail == null) {
+            showAppleLibrary = false
         }
         BackHandler(enabled = showAccountScrobbling && !showDiscord && !showSpotify) {
             showAccountScrobbling = false
@@ -4049,6 +4060,7 @@ private fun BitChordApp(
                 // on the difference between two of these.
                 val pageKey = when {
                     showSpotify && detail == null -> "spotify"
+                    showAppleLibrary && detail == null -> "apple_library"
                     showDiscord -> "discord"
                     showHistory -> "history"
                     showFlow -> "flow"
@@ -4390,6 +4402,29 @@ private fun BitChordApp(
                             },
                             contentPadding = listPadding,
                         )
+                    } else if (key == "apple_library") {
+                        val appleConfig = sourceConfigs.firstOrNull {
+                            it.kind == com.music.bitchord.data.sources.SourceKind.ADDON &&
+                                it.enabled &&
+                                it.isComplete &&
+                                it.catalogRole == com.music.bitchord.data.sources.SourceCatalogRole.APPLE_MUSIC
+                        }
+                        if (appleConfig == null) {
+                            Text(
+                                text = "Apple Music library is not configured",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(20.dp),
+                            )
+                        } else {
+                            AppleLibraryScreen(
+                                config = appleConfig,
+                                onPlaySong = { song ->
+                                    playWithResume(listOf(song), 0)
+                                },
+                                contentPadding = listPadding,
+                            )
+                        }
                     } else if (key == "discord") {
                         DiscordScreen(
                             song = player.song,
@@ -5381,6 +5416,7 @@ private fun BitChordApp(
                     pullFraction = { currentPull?.distanceFraction ?: 0f },
                     onBack = when {
                         showSpotify && detail == null -> ({ showSpotify = false })
+                        showAppleLibrary && detail == null -> ({ showAppleLibrary = false })
                         showDiscord -> ({ showDiscord = false })
                         showHistory -> ({ showHistory = false })
                         showFlow -> ({ showFlow = false })
@@ -5697,6 +5733,7 @@ private fun BitChordApp(
                     showGenres = false
                     showDiscord = false
                     showSpotify = false
+                    showAppleLibrary = false
                     settingsSubScreen = null
                     showHistory = false
                     showFlow = false

@@ -1171,10 +1171,12 @@ internal fun SourceEditorAlert(
      * and the values typed for them.
      *
      * The schema comes from the manifest, so an addon declaring nothing secret
-     * shows no extra field and behaves exactly as before. Values are stored in
-     * the config and travel as query parameters — see
-     * [AddonClient.settingsFor] — and are cleared the moment the address is
-     * edited, so a key is never sent to a server it was not entered for.
+     * shows no extra field and behaves exactly as before. Ordinary values are
+     * stored in the config and travel as query parameters — see
+     * [AddonClient.settingsFor]. The optional Apple library credential is
+     * stored the same way but travels only in its declared authentication
+     * header. Fields are cleared when the address is edited, so a key is never
+     * sent to a server it was not entered for.
      */
     var secretSettings by remember { mutableStateOf(emptyList<AddonSetting>()) }
     val secretValues = remember {
@@ -1189,9 +1191,20 @@ internal fun SourceEditorAlert(
     suspend fun loadSecrets(base: String): List<AddonSetting> =
         withContext(Dispatchers.IO) {
             runCatching {
-                AddonClient(base.trim()).manifest().getOrNull()
-                    ?.settings.orEmpty()
+                val manifest = AddonClient(base.trim()).manifest().getOrNull()
+                val declared = manifest?.settings.orEmpty()
                     .filter { it.secret && it.key.isNotBlank() }
+                val librarySetting = manifest?.library?.authentication?.setting
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { key ->
+                        AddonSetting(
+                            key = key,
+                            label = "Apple Music library credential",
+                            secret = true,
+                        )
+                    }
+                (declared + listOfNotNull(librarySetting))
+                    .distinctBy { it.key }
             }.getOrDefault(emptyList())
         }
 

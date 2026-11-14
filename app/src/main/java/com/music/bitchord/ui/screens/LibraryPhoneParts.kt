@@ -8,6 +8,7 @@ import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Lan
 import androidx.compose.material.icons.rounded.MenuBook
+import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -21,6 +22,9 @@ import com.music.bitchord.sharedui.resources.Res
 import com.music.bitchord.sharedui.resources.spotify_logo
 import com.music.bitchord.data.model.ShelfItem
 import com.music.bitchord.data.settings.AppSettings
+import com.music.bitchord.data.sources.SourceCatalogRole
+import com.music.bitchord.data.sources.SourceKind
+import com.music.bitchord.data.sources.SourceRegistry
 import com.music.bitchord.download.Downloads
 import com.music.bitchord.download.SavedCollection
 import com.music.bitchord.ui.components.PAGE_GUTTER
@@ -47,6 +51,14 @@ fun libraryLinks(): List<LibraryLink> {
     val smbShare by AppSettings.smbShare.collectAsStateWithLifecycle()
     val showCacheFolder by AppSettings.showCacheFolder.collectAsStateWithLifecycle()
     val spotifyConnected by AppSettings.spotifySpdcToken.collectAsStateWithLifecycle()
+    val appleCatalogEnabled by AppSettings.appleCatalogEnabled.collectAsStateWithLifecycle()
+    val sourceConfigs by SourceRegistry.configs.collectAsStateWithLifecycle()
+    val appleLibraryConfigured = appleCatalogEnabled && sourceConfigs.any {
+        it.kind == SourceKind.ADDON &&
+            it.enabled &&
+            it.isComplete &&
+            it.catalogRole == SourceCatalogRole.APPLE_MUSIC
+    }
     fun link(icon: ImageVector, title: String, subtitle: String, browseId: String) = LibraryLink(
         item = ShelfItem(
             title = title,
@@ -107,6 +119,12 @@ fun libraryLinks(): List<LibraryLink> {
             stringResource(R.string.spotify_library_subtitle),
             SPOTIFY_BROWSE_ID,
         ).takeIf { spotifyConnected.isNotBlank() }?.copy(logo = Res.drawable.spotify_logo),
+        link(
+            Icons.Rounded.MusicNote,
+            "Apple Music",
+            "Your authenticated Apple Music library",
+            APPLE_BROWSE_ID,
+        ).takeIf { appleLibraryConfigured },
     )
 }
 
@@ -138,6 +156,9 @@ fun libraryDeviceItems(downloadedReleases: List<SavedCollection>): List<ShelfIte
 
 /** The Library row that opens the connected Spotify account; handled by the app, not a browse page. */
 const val SPOTIFY_BROWSE_ID = "app:spotify"
+
+/** The Library row that opens the authenticated Apple Music addon library. */
+const val APPLE_BROWSE_ID = "app:apple-music-library"
 
 /** The Cached songs folder's page id — one of the `local:` device folders. */
 const val CACHE_FOLDER_BROWSE_ID = "local:cache"

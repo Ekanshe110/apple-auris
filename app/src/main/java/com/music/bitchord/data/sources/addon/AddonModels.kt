@@ -72,6 +72,12 @@ data class AddonManifest(
      * Read through [requiresLosslessOutput].
      */
     @SerialName("checkValidLossless") val checkValidLossless: JsonElement? = null,
+    /**
+     * Optional authenticated-library support. Absent means the addon does not
+     * advertise library access; it does not mean the app should probe private
+     * routes or invent a provider.
+     */
+    @SerialName("library") val library: AddonLibraryCapability? = null,
 ) {
     val downloadsAllowed: Boolean get() = allowDownloads.asFlag() ?: true
 
@@ -136,6 +142,103 @@ data class AddonSettingOption(
 ) {
     val stringValue: String? get() = value?.asQueryValue()
 }
+
+// ── Library ──────────────────────────────────────────────────────────────
+
+/**
+ * The optional library protocol advertised by an addon.
+ *
+ * This is deliberately explicit. A catalogue addon and an authenticated
+ * account library are different products: only an addon which declares
+ * [provider] [PROVIDER_APPLE_MUSIC] and the requested collection is asked for
+ * account data. No route is guessed and no provider is inferred from a name.
+ */
+@Serializable
+data class AddonLibraryCapability(
+    @SerialName("provider") val provider: String = "",
+    @SerialName("collections") val collections: List<String> = emptyList(),
+    @SerialName("authentication") val authentication: AddonLibraryAuthentication? = null,
+) {
+    val isAppleMusic: Boolean get() = provider.equals(PROVIDER_APPLE_MUSIC, ignoreCase = true)
+
+    fun supportsCollection(collection: String): Boolean =
+        collections.any { it.equals(collection, ignoreCase = true) }
+
+    companion object {
+        const val PROVIDER_APPLE_MUSIC = "apple-music"
+        const val COLLECTION_PLAYLISTS = "playlists"
+        const val COLLECTION_ALBUMS = "albums"
+        const val COLLECTION_SONGS = "songs"
+    }
+}
+
+/** How an addon expects the library credential to be presented. */
+@Serializable
+data class AddonLibraryAuthentication(
+    /** `bearer`, `basic`, `header`, or `none`. */
+    @SerialName("type") val type: String = TYPE_BEARER,
+    /** Header carrying the credential. Never a query parameter. */
+    @SerialName("header") val header: String = "Authorization",
+    /** Key in the addon's stored settings holding this credential. */
+    @SerialName("setting") val setting: String = "libraryToken",
+    @SerialName("required") val required: Boolean = true,
+) {
+    companion object {
+        const val TYPE_BEARER = "bearer"
+        const val TYPE_BASIC = "basic"
+        const val TYPE_HEADER = "header"
+        const val TYPE_NONE = "none"
+    }
+}
+
+/** One page from a library collection. */
+@Serializable
+data class AddonLibraryPage(
+    @SerialName("items") val items: List<AddonLibraryItem> = emptyList(),
+    @SerialName("offset") val offset: Int = 0,
+    @SerialName("limit") val limit: Int = 0,
+    @SerialName("total") val total: Int? = null,
+    @SerialName("hasMore") val hasMore: Boolean? = null,
+    @SerialName("nextOffset") val nextOffset: Int? = null,
+)
+
+/**
+ * A playlist, album, song, or track within a collection.
+ *
+ * The three identifiers have different meanings and are all retained:
+ * [id] identifies the object in the user's library, [catalogId] is Apple's
+ * catalogue identifier when the addon knows it, and [streamId] is the id the
+ * addon accepts when opening a stream. They must not be substituted for one
+ * another.
+ */
+@Serializable
+data class AddonLibraryItem(
+    @SerialName("id") val id: String = "",
+    @SerialName("catalogId") val catalogId: String = "",
+    @SerialName("streamId") val streamId: String = "",
+    @SerialName("title") val title: String = "",
+    @SerialName("artist") val artist: String = "",
+    @SerialName("album") val album: String = "",
+    @SerialName("artworkURL") val artworkURL: String = "",
+    @SerialName("duration") val duration: Double? = null,
+) {
+    val durationSec: Int? get() = duration?.takeIf { it > 0 }?.toInt()
+    val artwork: String? get() = artworkURL.ifBlank { null }
+}
+
+/** Machine-readable error body returned by a library endpoint. */
+@Serializable
+data class AddonErrorBody(
+    @SerialName("code") val code: String? = null,
+    @SerialName("message") val message: String? = null,
+    @SerialName("error") val error: AddonErrorDetails? = null,
+)
+
+@Serializable
+data class AddonErrorDetails(
+    @SerialName("code") val code: String? = null,
+    @SerialName("message") val message: String? = null,
+)
 
 // ── Search ───────────────────────────────────────────────────────────────
 

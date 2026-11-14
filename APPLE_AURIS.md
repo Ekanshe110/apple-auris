@@ -26,9 +26,11 @@ With the setting disabled, upstream Spotify recommendations, matching, and fallb
 
 ## Apple Music library
 
-Apple library access depends on the configured addon exposing an authenticated Apple Music library endpoint. The client expects playlist, album, and song collection responses carrying stable Apple IDs and artwork. A missing endpoint is reported as unavailable; the app does not fabricate playlists or scrape a private web session.
+The Android client includes an addon-backed Apple Music library protocol and a dedicated Library page. It parses an optional manifest capability, reads paged playlist/album/song collections and collection tracks, preserves library/catalog/stream identifiers, and exposes machine-readable authentication errors. The page distinguishes loading, empty, signed-out, and failed states. It does not include MusicKit integration, an Apple sign-in flow, or fabricated library data.
 
-See [docs/APPLE_LIBRARY_ENDPOINT.md](docs/APPLE_LIBRARY_ENDPOINT.md) for the required contract and current limitations.
+Library access requires an external addon that implements the documented endpoint and a real Apple Music account configured with that addon. The app can present the addon's account state, but cannot sign in to Apple directly.
+
+See [docs/APPLE_LIBRARY_ENDPOINT.md](docs/APPLE_LIBRARY_ENDPOINT.md) for the exact contract and current limitations.
 
 ## Building
 
