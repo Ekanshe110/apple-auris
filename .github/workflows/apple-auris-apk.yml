@@ -1,0 +1,118 @@
+name: Apple Auris APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feature/automix-core-v2]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "Banner.png"
+      - "BANNER.png"
+      - "Logo.png"
+      - "LOGO.png"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apple-auris-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build signed Apple Auris APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+          cache: gradle
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Write local.properties
+        run: |
+          {
+            echo "sdk.dir=${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+            echo "LASTFM_API_KEY=${{ secrets.LASTFM_API_KEY }}"
+            echo "LASTFM_SECRET=${{ secrets.LASTFM_SECRET }}"
+          } > local.properties
+
+      - name: Decode signing key
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          test -n "$ANDROID_KEYSTORE_B64"
+          printf '%s' "$ANDROID_KEYSTORE_B64" | base64 -d > bitchord-apple.jks
+          {
+            echo "storeFile=bitchord-apple.jks"
+            echo "storePassword=android"
+            echo "keyAlias=forkdebug"
+            echo "keyPassword=android"
+          } > keystore.properties
+          chmod 600 bitchord-apple.jks keystore.properties
+
+      - run: chmod +x gradlew
+
+      - name: Build
+        run: ./gradlew :app:assembleDevRelease --stacktrace --console=plain
+
+      - name: Verify package, label, version and signature
+        env:
+          EXPECTED_PACKAGE: com.dev.bitchord
+          EXPECTED_LABEL: Apple Auris
+          EXPECTED_VERSION_CODE: "149"
+          EXPECTED_VERSION_NAME: "3.0.41-apple.1"
+          EXPECTED_SIGNER_SHA256: "fe7d54041b91fc9383ac0945d1a2dbffac608e38498a2aa7d7c7ffc4e037cd29"
+        run: |
+          set -euo pipefail
+          bt="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          apks=(app/build/outputs/apk/dev/release/*.apk)
+          test "${#apks[@]}" -gt 0
+          for apk in "${apks[@]}"; do
+            echo "== $apk"
+            badging="$("$bt/aapt2" dump badging "$apk")"
+            package_line="$(printf '%s\n' "$badging" | grep -E '^package:' | head -1)"
+            label_line="$(printf '%s\n' "$badging" | grep -E "^application-label:" | head -1)"
+            echo "$package_line"
+            echo "$label_line"
+            printf '%s\n' "$package_line" | grep -q "package: name='$EXPECTED_PACKAGE'"
+            printf '%s\n' "$package_line" | grep -q "versionCode='$EXPECTED_VERSION_CODE'"
+            printf '%s\n' "$package_line" | grep -q "versionName='$EXPECTED_VERSION_NAME'"
+            printf '%s\n' "$label_line" | grep -q "application-label:'$EXPECTED_LABEL'"
+            certs="$("$bt/apksigner" verify --print-certs "$apk")"
+            printf '%s\n' "$certs" | grep -i "sha-256" | head -1
+            cert="$(printf '%s\n' "$certs" | grep -i "sha-256" | head -1 | tr -d ':' | grep -oiE '[0-9a-f]{64}' | head -1)"
+            test "$cert" = "$EXPECTED_SIGNER_SHA256"
+          done
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apple-auris-apk
+          path: app/build/outputs/apk/dev/release/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Draft a GitHub release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXPECTED_VERSION_NAME: "3.0.41-apple.1"
+        run: |
+          set -euo pipefail
+          tag="apple-auris-${{ github.run_number }}"
+          gh release create "$tag" app/build/outputs/apk/dev/release/*.apk \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft \
+            --prerelease \
+            --title "Apple Auris ${{ github.run_number }}" \
+            --notes "Apple Auris $EXPECTED_VERSION_NAME built from $GITHUB_SHA."
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json tagName,isDraft,assets

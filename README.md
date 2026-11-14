@@ -6,6 +6,9 @@
 
 # Auris
 
+> [!NOTE]
+> **Apple Auris** is a focused fork of [OreoMuncher45/Auris](https://github.com/OreoMuncher45/Auris). It keeps upstream's player and music engine as the source of truth while adding opt-in Apple Music catalog and library support. See [APPLE_AURIS.md](APPLE_AURIS.md).
+
 ### A lossless-first Android music player, rebuilt from BitChord
 
 <br/>
