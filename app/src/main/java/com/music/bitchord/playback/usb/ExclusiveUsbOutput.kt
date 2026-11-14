@@ -18,6 +18,7 @@ import androidx.media3.common.Format
 import androidx.media3.common.MimeTypes
 import com.decent.usbaudio.UsbAudioDevice
 import com.decent.usbaudio.UsbAudioStream
+import com.music.bitchord.data.settings.AppSettings
 import com.music.bitchord.playback.audio.PrecisionAudioSink
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -44,7 +45,7 @@ class ExclusiveUsbOutput(
     @Volatile private var hardwareVolume = false
     @Volatile private var configuredRateHz = 0
     @Volatile private var configuredChannelCount = 0
-    @Volatile private var listeningGain = 1f
+    @Volatile private var listeningGain = DEFAULT_ATTACH_GAIN
     @Volatile private var softwareGainValue = 1f
     @Volatile private var lastHardwareRate = 0
 
@@ -66,6 +67,7 @@ class ExclusiveUsbOutput(
     @Volatile private var lastWriteElapsedMs = 0L
     @Volatile private var writingInProgress = false
     @Volatile private var paused = false
+    /** Independent app gain (fades/ducking), never the listening slider. */
     private var pendingVolume = 1f
     private var featureVolume: UacFeatureVolume? = null
     /** True when the DAC answered GET_CUR for its clock during this session. */
@@ -78,7 +80,7 @@ class ExclusiveUsbOutput(
         private set
     /** True when retrying the open could plausibly succeed (device/permission). */
     @Volatile private var lastFailureRetryable = false
-    @Volatile private var lastAppliedCombined = Float.NaN
+    @Volatile private var lastAppliedListening = Float.NaN
     private var volumeProbed = false
     @Volatile private var lastNonMaxListeningGain = Float.NaN
     @Volatile private var ignoreStreamMusicMax = false
@@ -96,8 +98,10 @@ class ExclusiveUsbOutput(
 
     init {
         clearBlockedDevices()
-        lastNonMaxListeningGain = volumePrefs.getFloat(KEY_LAST_NON_MAX_GAIN, Float.NaN)
-        rememberStreamGain(readStreamMusicGain())
+        // v2 deliberately uses a new key. Older builds stored a phone-speaker
+        // level in the old key, so loading it would put an unrelated route's
+        // volume onto the next DAC session.
+        lastNonMaxListeningGain = volumePrefs.getFloat(KEY_LAST_NON_MAX_DAC_GAIN, Float.NaN)
     }
 
     private val volumeReceiver = object : BroadcastReceiver() {
@@ -160,7 +164,7 @@ class ExclusiveUsbOutput(
             if (value && active && hardwareVolume) {
                 runCatching { featureVolume?.setNormalized(1f) }
                 hardwareVolume = false
-                lastAppliedCombined = Float.NaN
+                lastAppliedListening = Float.NaN
                 applyVolumeLocked()
                 Log.i(TAG, "volume forced to software; Feature Unit parked at 0 dB")
             }
@@ -187,7 +191,7 @@ class ExclusiveUsbOutput(
      * PCM software gain for exclusive output. 1 when a verified Feature Unit
      * owns listening level; otherwise STREAM_MUSIC × Media3 volume.
      */
-    fun softwareGain(): Float = if (!active || hardwareVolume) 1f else softwareGainValue
+    fun softwareGain(): Float = if (!active) 1f else softwareGainValue
 
     fun currentRateHz(): Int = if (active) configuredRateHz else 0
 
@@ -276,8 +280,12 @@ class ExclusiveUsbOutput(
         // change (a volume key press) ends the hold and applies normally.
         if (ignoreStreamMusicMax && stream >= ATTACH_MAX_PIN_GAIN) return
         if (stream < ATTACH_MAX_PIN_GAIN) ignoreStreamMusicMax = false
+        // Only a level chosen while this DAC session is active belongs to the
+        // DAC. A phone-speaker or Bluetooth level read at app start must not
+        // become the next exclusive session's fallback level.
+        if (active) rememberStreamGain(stream)
         val next = stream
-        if (lastAppliedCombined.isFinite() &&
+        if (lastAppliedListening.isFinite() &&
             kotlin.math.abs(next - listeningGain) < 1e-4f
         ) {
             listeningGain = next
@@ -358,21 +366,19 @@ class ExclusiveUsbOutput(
             startMediaTimeUs = presentationTimeUs.coerceAtLeast(0L)
             startMediaTimeNeedsInit = false
         }
-        val gain = softwareGain()
+        // Queue unscaled PCM. The writer applies the current gain as each
+        // chunk leaves the queue, so a volume change is heard immediately
+        // instead of after the already queued audio has played.
         val chunk = if (isFloatBuffer) {
             val floats = FloatArray(size / Float.SIZE_BYTES)
             buffer.order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(floats)
             buffer.position(buffer.limit())
-            ExclusivePcmGain.apply(floats, gain)
             QueuedPcm(floats, null, 0, size)
         } else {
             val encoding = writeRawEncoding(sourceEncoding)
             if (encoding < 0) return false
             val bytes = ByteArray(size)
             buffer.get(bytes)
-            if (gain < 1f - 1e-6f && gain >= 0f) {
-                scalePcmBytes(bytes, encoding, gain)
-            }
             QueuedPcm(null, bytes, encoding, size)
         }
         synchronized(pcmLock) {
@@ -465,7 +471,6 @@ class ExclusiveUsbOutput(
             pcmLock.notifyAll()
         }
         synchronized(lock) {
-            pendingVolume = 1f
             applyVolumeLocked()
         }
         startMediaTimeNeedsInit = true
@@ -490,6 +495,20 @@ class ExclusiveUsbOutput(
         val normalized = volume.coerceIn(0f, 1f)
         synchronized(lock) {
             pendingVolume = normalized
+            applyVolumeLocked()
+        }
+    }
+
+    /**
+     * Sends the current listening level again after a session configure.
+     *
+     * Some DACs accept the first SET_CUR but do not retain it until the
+     * stream starts. Forcing one idempotent transfer here closes that race
+     * before the first PCM buffer is written.
+     */
+    fun reapplyVolume() {
+        synchronized(lock) {
+            lastAppliedListening = Float.NaN
             applyVolumeLocked()
         }
     }
@@ -540,7 +559,6 @@ class ExclusiveUsbOutput(
                 mediaTimeBaseFrames = reuse.framesWritten
                 lastClockCheckMs = SystemClock.elapsedRealtime()
                 ensureVolumeObserverLocked()
-                pendingVolume = 1f
                 syncListeningGainLocked()
                 return true
             }
@@ -665,7 +683,6 @@ class ExclusiveUsbOutput(
         lastFailureReason = null
         lastFailureRetryable = false
         paused = false
-        pendingVolume = 1f
         startMediaTimeNeedsInit = true
         startMediaTimeUs = 0L
         mediaTimeBaseFrames = 0L
@@ -697,9 +714,8 @@ class ExclusiveUsbOutput(
         )
 
         ensureVolumeObserverLocked()
-        rememberStreamGain(readStreamMusicGain())
         listeningGain = listeningGainForDac()
-        lastAppliedCombined = Float.NaN
+        lastAppliedListening = Float.NaN
         applyVolumeLocked()
         Log.i(
             TAG,
@@ -731,7 +747,8 @@ class ExclusiveUsbOutput(
     fun diagnosticReport(): String = buildString {
         append("BitChord USB diagnostic\n")
         append("active=$active wanted=$wanted rate=$configuredRateHz clockMatched=$clockMatched ")
-        append("hardwareVolume=$hardwareVolume forceSoftwareVolume=$forceSoftwareVolume\n")
+        append("hardwareVolume=$hardwareVolume forceSoftwareVolume=$forceSoftwareVolume ")
+        append("listeningGain=$listeningGain softwareGain=$softwareGainValue appGain=$pendingVolume\n")
         if (sessionSummary.isNotEmpty()) append(sessionSummary).append('\n')
         lastFailureReason?.let { append("lastFailure=").append(it).append('\n') }
         append(runCatching { usbAudio.diagnosticReport() }.getOrDefault(""))
@@ -758,28 +775,35 @@ class ExclusiveUsbOutput(
 
     private fun readStreamMusicGain(): Float? {
         val manager = audioManager ?: return null
-        val max = runCatching { manager.getStreamMaxVolume(AudioManager.STREAM_MUSIC) }.getOrDefault(0)
+        val max = runCatching { manager.getStreamMaxVolume(AudioManager.STREAM_MUSIC) }.getOrNull() ?: return null
         if (max <= 0) return null
-        val vol = runCatching { manager.getStreamVolume(AudioManager.STREAM_MUSIC) }.getOrDefault(max)
-        val gain = vol.coerceIn(0, max).toFloat() / max
-        rememberStreamGain(gain)
-        return gain
+        // A failed read is unknown, not maximum. Treating an exception as the
+        // old fallback value opened the DAC at full scale.
+        val vol = runCatching { manager.getStreamVolume(AudioManager.STREAM_MUSIC) }.getOrNull() ?: return null
+        return vol.coerceIn(0, max).toFloat() / max
     }
 
     private fun rememberStreamGain(gain: Float?) {
         if (gain != null && gain in MIN_REMEMBERED_GAIN..ATTACH_MAX_PIN_GAIN) {
             lastNonMaxListeningGain = gain
-            runCatching { volumePrefs.edit().putFloat(KEY_LAST_NON_MAX_GAIN, gain).apply() }
+            runCatching { volumePrefs.edit().putFloat(KEY_LAST_NON_MAX_DAC_GAIN, gain).apply() }
         }
     }
 
     private fun listeningGainForDac(): Float {
         val stream = readStreamMusicGain() ?: return listeningGain
-        attachMaxPinFallbackGain(stream, lastNonMaxListeningGain)?.let { remembered ->
+        if (active) rememberStreamGain(stream)
+        val fallback = when {
+            lastNonMaxListeningGain.isFinite() -> lastNonMaxListeningGain
+            AppSettings.playerVolume.value < ATTACH_MAX_PIN_GAIN ->
+                AppSettings.playerVolume.value
+            else -> DEFAULT_ATTACH_GAIN
+        }
+        attachMaxPinFallbackGain(stream, fallback)?.let { remembered ->
             ignoreStreamMusicMax = true
             Log.i(
                 TAG,
-                "STREAM_MUSIC pinned at max on attach; using remembered listening gain $remembered",
+                "STREAM_MUSIC pinned at max on attach; using fallback listening gain $remembered",
             )
             return remembered
         }
@@ -792,23 +816,32 @@ class ExclusiveUsbOutput(
         applyVolumeLocked()
     }
 
+    /**
+     * Applies two different gains exactly once each.
+     *
+     * [listeningGain] is the system's listening level. It receives the
+     * perceptual dB curve, on the DAC's Feature Unit when one is verified and
+     * in software otherwise. [pendingVolume] is an independent app gain such
+     * as a fade or duck and stays linear.
+     *
+     * Multiplying the two before applying either curve applied the same
+     * slider twice. At half volume that became roughly -40 dB instead of
+     * -31 dB, which felt like enormous jumps around the bottom of the range.
+     */
     private fun applyVolumeLocked() {
-        val combined = (listeningGain * pendingVolume).coerceIn(0f, 1f)
-        val unchanged = lastAppliedCombined.isFinite() && kotlin.math.abs(combined - lastAppliedCombined) < 1e-4f
-        if (hardwareVolume) {
-            softwareGainValue = 1f
-            if (!unchanged) {
-                val applied = featureVolume?.setNormalized(combined) == true
-                if (!applied) {
-                    hardwareVolume = false
-                    softwareGainValue = UacFeatureVolume.perceptualLinearGain(combined)
-                    Log.w(TAG, "Feature Unit SET_CUR failed; falling back to perceptual software gain")
-                }
-                lastAppliedCombined = combined
-            }
+        val listening = listeningGain.coerceIn(0f, 1f)
+        val unchanged = lastAppliedListening.isFinite() &&
+            kotlin.math.abs(listening - lastAppliedListening) < 1e-4f
+        lastAppliedListening = listening
+        if (hardwareVolume && !unchanged && featureVolume?.setNormalized(listening) != true) {
+            hardwareVolume = false
+            Log.w(TAG, "Feature Unit SET_CUR failed; falling back to perceptual software gain")
+        }
+        val app = pendingVolume.coerceIn(0f, 1f)
+        softwareGainValue = if (hardwareVolume) {
+            app
         } else {
-            softwareGainValue = UacFeatureVolume.perceptualLinearGain(combined)
-            lastAppliedCombined = combined
+            exclusiveSoftwareGain(listening, app)
         }
     }
 
@@ -870,8 +903,7 @@ class ExclusiveUsbOutput(
             writingInProgress = true
             lastWriteElapsedMs = SystemClock.elapsedRealtime()
             try {
-                if (next.floats != null) target.write(next.floats)
-                else if (next.raw != null) target.writeRaw(next.raw, next.encoding)
+                writeScaled(target, next)
             } finally {
                 writingInProgress = false
                 lastWriteElapsedMs = SystemClock.elapsedRealtime()
@@ -903,6 +935,21 @@ class ExclusiveUsbOutput(
         active = false
         writerStop = true
         return false
+    }
+
+    /** Writer thread only: applies the current software gain before the USB write. */
+    private fun writeScaled(target: UsbAudioStream, chunk: QueuedPcm) {
+        val gain = softwareGain()
+        chunk.floats?.let { floats ->
+            ExclusivePcmGain.apply(floats, gain)
+            target.write(floats)
+            return
+        }
+        val bytes = chunk.raw ?: return
+        if (gain < 1f - 1e-6f && gain >= 0f) {
+            scalePcmBytes(bytes, chunk.encoding, gain)
+        }
+        target.writeRaw(bytes, chunk.encoding)
     }
 
     private fun stopStreamLocked() {
@@ -941,7 +988,7 @@ class ExclusiveUsbOutput(
         configuredChannelCount = 0
         active = false
         softwareGainValue = 1f
-        lastAppliedCombined = Float.NaN
+        lastAppliedListening = Float.NaN
         startMediaTimeNeedsInit = true
         startMediaTimeUs = 0L
         mediaTimeBaseFrames = 0L
@@ -968,7 +1015,7 @@ class ExclusiveUsbOutput(
         const val TAG = "ExclusiveUsb"
         const val VOLUME_CHANGED_ACTION = "android.media.VOLUME_CHANGED_ACTION"
         const val EXTRA_VOLUME_STREAM_TYPE = "android.media.EXTRA_VOLUME_STREAM_TYPE"
-        const val KEY_LAST_NON_MAX_GAIN = "last_non_max_stream_gain"
+        const val KEY_LAST_NON_MAX_DAC_GAIN = "last_non_max_dac_stream_gain_v2"
         const val KEY_BLOCK_PREFIX = "blocked_dac_"
         const val CLOCK_CHECK_INTERVAL_MS = 5_000L
         const val CLOCK_SETTLE_TRIES = 10
@@ -1081,8 +1128,15 @@ internal fun attachMaxPinFallbackGain(streamGain: Float, rememberedGain: Float):
     return rememberedGain
 }
 
+/** Effective PCM gain when the DAC cannot own the listening level itself. */
+internal fun exclusiveSoftwareGain(listeningGain: Float, appGain: Float): Float =
+    UacFeatureVolume.perceptualLinearGain(listeningGain) * appGain.coerceIn(0f, 1f)
+
 /** Raw readings at/above this are the attach-time pin, not a chosen level. */
 private const val ATTACH_MAX_PIN_GAIN = 0.999f
+
+/** Safe level used only when attach reports maximum with no prior DAC level. */
+private const val DEFAULT_ATTACH_GAIN = 0.6f
 
 /** Quietest level remembered as the user's real listening gain. */
 private const val MIN_REMEMBERED_GAIN = 0.01f

@@ -98,8 +98,6 @@ class PrecisionAudioSink(
      * Android 14 mixer to do.
      */
     private val exclusiveUsb: ExclusiveUsbOutput? = null,
-    /** The level last handed to the DAC, so it is only sent when it changes. */
-    @Volatile private var exclusiveGainApplied: Float = 1f,
     /**
      * Whether exclusive USB output should be attempted for the next configure.
      * Same switch as [bitPerfect]; separate so the caller decides the route.
@@ -407,6 +405,10 @@ class PrecisionAudioSink(
             if (playing) runCatching { delegate.play() }
             return !session.failureIsRetryable()
         }
+        // The DAC may only retain its volume after the stream has started.
+        // Submit the current effective level before the first exclusive buffer
+        // instead of trusting a cached "already applied" value.
+        runCatching { session.reapplyVolume() }
         exclusiveActive = true
         exclusiveEnded = false
         if (isAudible()) {
@@ -519,16 +521,10 @@ class PrecisionAudioSink(
             return ExclusiveOutcome.FALL_THROUGH
         }
         if (session.isPaused()) return ExclusiveOutcome.BACKPRESSURE
-        // On the exclusive route the PCM goes to the DAC untouched, and the
-        // DAC's own volume control is what the bar drives: the samples stay
-        // bit-exact and the sound still gets quieter.
-        if (AppSettings.bitPerfect.value) {
-            val level = AppSettings.playerVolume.value.coerceIn(0f, 1f)
-            if (level != exclusiveGainApplied) {
-                exclusiveGainApplied = level
-                runCatching { session.setVolume(level) }
-            }
-        }
+        // The exclusive session reads STREAM_MUSIC itself and applies that
+        // listening level once. AppSettings.playerVolume mirrors the same
+        // system value, so sending it here as well would square the slider
+        // and turn normal steps into huge jumps.
         val encoding = inputPcmEncoding ?: return ExclusiveOutcome.FALL_THROUGH
         if (session.write(buffer, presentationTimeUs, isFloatBuffer = encoding == PcmEncoding.PCM_FLOAT)) {
             exclusiveEnded = false
@@ -943,6 +939,10 @@ class PrecisionAudioSink(
         // takes the listener's level; see [tryExclusiveBuffer] and the
         // software gain in [handleBuffer].
         if (AppSettings.bitPerfect.value) {
+            // Crossfade/duck gains are independent app gain. Bit-perfect keeps
+            // the PCM untouched, so this branch is unity rather than another
+            // copy of the listener's system level.
+            if (isAudible()) runCatching { exclusiveUsb?.setVolume(1f) }
             super.setVolume(1f)
             return
         }

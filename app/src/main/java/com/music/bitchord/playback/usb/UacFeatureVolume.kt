@@ -14,6 +14,10 @@ import kotlin.math.roundToInt
  * attenuates. Dongles without a real volume control fail closed so the
  * exclusive path can software-scale instead of claiming hardware volume.
  */
+/** Whether a Feature Unit readback proves that SET_CUR changed its volume. */
+internal fun featureVolumeReadbackProvesWritable(original: Int?, updated: Int?): Boolean =
+    updated != null && updated != original
+
 class UacFeatureVolume(
     private val connection: UsbDeviceConnection,
     private val controlInterfaceId: Int,
@@ -173,13 +177,18 @@ class UacFeatureVolume(
         } else {
             writeVolume(unitId, channel, maxRaw)
         }
-        val changed = updated != null && updated != original
+        val changed = featureVolumeReadbackProvesWritable(original, updated)
         Log.i(
             TAG,
             "verify FU 0x${unitId.toString(16)} ch=$channel original=$original " +
                 "test=$test readback=$updated restored=$restored writable=$changed",
         )
-        return (changed || restored)
+        // A successful restore only proves the control accepted a transfer.
+        // It does not prove that SET_CUR changed the DAC's current volume.
+        // Treating a non-functional Feature Unit as writable stacks its
+        // unchanged gain with the software path and can leave the DAC at an
+        // unexpectedly high level.
+        return changed
     }
 
     private fun verifyWritableChannels(unitId: Int, found: IntArray): IntArray {
