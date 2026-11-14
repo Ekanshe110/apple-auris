@@ -1143,8 +1143,8 @@ object AudioCache {
                 // below, which would write a different recording's bytes under
                 // an entry this track owns.
                 val appleSourceId = head.uri
-                    ?.takeIf { Uri.parse(it).authority == "source" }
-                    ?.let { Uri.parse(it).getQueryParameter("s") }
+                    ?.takeIf { it.authority == "source" }
+                    ?.getQueryParameter("s")
                 val directApple = AppSettings.appleRichModeEnabled &&
                     appleSourceId != null &&
                     SourceRegistry.isAppleStrictRouting(appleSourceId)

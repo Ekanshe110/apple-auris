@@ -776,6 +776,9 @@ fun Song.toMediaItem(parentBrowseId: String? = null, playLocalFile: Boolean = tr
     val offlineFormat: String? = if (playFile) Downloads.savedFormat(videoId) else null
     val formatBadge: String? = downloadFormat ?: offlineFormat
     val playUri = offlineUri?.takeIf { playFile }
+    // Keep a local copy for the smart cast below. Song's public API property
+    // comes from another module, so Kotlin cannot smart-cast it directly.
+    val exactAppleCatalogId = appleCatalogId
     val uriString = playUri ?: when {
         videoId.startsWith("content://") || videoId.startsWith("file://") -> videoId
         // A chapter of a public-domain book is a file on an archive, not a
@@ -794,9 +797,10 @@ fun Song.toMediaItem(parentBrowseId: String? = null, playLocalFile: Boolean = tr
         // through the configured Apple addon. The media id stays the original
         // Spotify/YouTube id, so history and queue identity do not change, but
         // no lookup or cross-source matcher runs on the loader thread.
-        appleCatalogId != null && AppSettings.appleRichModeEnabled ->
+        exactAppleCatalogId != null && AppSettings.appleRichModeEnabled ->
             SourceRegistry.appleCatalogConfig()?.id?.let { appleConfigId ->
-                SourceRegistry.trackUri(appleConfigId, appleCatalogId).let { "$it${matchQuery()}" }
+                SourceRegistry.trackUri(appleConfigId, exactAppleCatalogId)
+                    .let { "$it${matchQuery()}" }
             } ?: "bitchord://watch?v=$videoId${matchQuery()}"
         // A track the listener reverted by hand stays reverted — see
         // [OriginalVersion]. Applied here rather than at the one menu that
