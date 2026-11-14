@@ -61,6 +61,10 @@ object LocalPlaylistStore {
                         albumId = sObj.optString("albumId", null).takeIf { !it.isNullOrBlank() && it != "null" },
                         albumName = sObj.optString("albumName", null).takeIf { !it.isNullOrBlank() && it != "null" },
                         isVideo = sObj.optBoolean("isVideo", false),
+                        appleCatalogId = sObj.optString("appleCatalogId", null)
+                            .takeIf { !it.isNullOrBlank() && it != "null" },
+                        appleLookupError = sObj.optString("appleLookupError", null)
+                            .takeIf { !it.isNullOrBlank() && it != "null" },
                     )
                     songs.add(song)
                 }
@@ -178,6 +182,8 @@ object LocalPlaylistStore {
                     sObj.put("albumId", song.albumId)
                     sObj.put("albumName", song.albumName)
                     sObj.put("isVideo", song.isVideo)
+                    sObj.put("appleCatalogId", song.appleCatalogId)
+                    sObj.put("appleLookupError", song.appleLookupError)
                     songsArray.put(sObj)
                 }
                 pObj.put("songs", songsArray)

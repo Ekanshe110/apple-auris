@@ -148,6 +148,8 @@ object LastPlayed {
         val source: String? = null,
         val sourceType: String? = null,
         val sourceId: String? = null,
+        val appleCatalogId: String? = null,
+        val appleLookupError: String? = null,
     ) {
         fun toSong(): Song {
             val resolvedTier = when (tier) {
@@ -173,6 +175,8 @@ object LastPlayed {
                     runCatching { com.music.bitchord.data.model.PlaybackSourceType.valueOf(it) }.getOrNull()
                 },
                 playbackSourceId = sourceId,
+                appleCatalogId = appleCatalogId,
+                appleLookupError = appleLookupError,
                 localUri = local,
                 localPath = path,
             )
@@ -197,6 +201,8 @@ object LastPlayed {
                 source = song.playbackSource,
                 sourceType = song.playbackSourceType?.name,
                 sourceId = song.playbackSourceId,
+                appleCatalogId = song.appleCatalogId,
+                appleLookupError = song.appleLookupError,
             )
         }
     }

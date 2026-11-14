@@ -349,6 +349,15 @@ object AppSettings {
     val homeProvider = MutableStateFlow(HomeProvider.YOUTUBE)
 
     /**
+     * Whether Apple Rich Mode is active.
+     *
+     * Derived from the persisted Content source choice. There is deliberately
+     * no second persisted Apple feature switch.
+     */
+    val appleRichModeEnabled: Boolean
+        get() = homeProvider.value == HomeProvider.APPLE
+
+    /**
      * The transition planner Automix runs.
      *
      * Pinned to the phrase-aware engine: the legacy plan it replaced is gone,
@@ -708,9 +717,6 @@ object AppSettings {
      * metadata appears immediately while the catalogue match is resolved.
      */
     val preferMusicOnly = MutableStateFlow(false)
-
-    /** Whether the Apple Music catalogue is used for track metadata and artwork. */
-    val appleCatalogEnabled = MutableStateFlow(false)
 
     /** Analyzes audio waveform/envelope to align matching playback moment between versions. */
     val smartVersionAlignment = MutableStateFlow(true)
@@ -1635,7 +1641,13 @@ object AppSettings {
         swipeToPlayNext.value = prefs.getBoolean(KEY_SWIPE_TO_PLAY_NEXT, false)
         dontRepeatSuggestions.value = prefs.getBoolean(KEY_DONT_REPEAT_SUGGESTIONS, false)
         preferMusicOnly.value = prefs.getBoolean(KEY_PREFER_MUSIC_ONLY, false)
-        appleCatalogEnabled.value = prefs.getBoolean(KEY_APPLE_CATALOG_ENABLED, false)
+        // Older builds stored a separate Apple Rich Mode switch. Preserve an
+        // enabled choice by moving it into the Content source selection, then
+        // let that single persisted choice own the feature from here on.
+        if (prefs.getBoolean(KEY_APPLE_CATALOG_ENABLED, false)) {
+            homeProvider.value = HomeProvider.APPLE
+            prefs.edit().putString(KEY_HOME_PROVIDER, HomeProvider.APPLE.name).apply()
+        }
         smartVersionAlignment.value = prefs.getBoolean(KEY_SMART_VERSION_ALIGNMENT, true)
         reduceDynamicBlur.value = prefs.getBoolean(KEY_REDUCE_BLUR, lowEndDevice)
         liquidGlass.value = prefs.getBoolean(KEY_LIQUID_GLASS, false)
@@ -2324,11 +2336,6 @@ object AppSettings {
     fun setPreferMusicOnly(value: Boolean) {
         preferMusicOnly.value = value
         prefs.edit().putBoolean(KEY_PREFER_MUSIC_ONLY, value).apply()
-    }
-
-    fun setAppleCatalogEnabled(value: Boolean) {
-        appleCatalogEnabled.value = value
-        prefs.edit().putBoolean(KEY_APPLE_CATALOG_ENABLED, value).apply()
     }
 
     fun setSmartVersionAlignment(value: Boolean) {
@@ -3260,6 +3267,7 @@ object AppSettings {
     private const val KEY_SWIPE_TO_PLAY_NEXT = "swipe_to_play_next"
     private const val KEY_DONT_REPEAT_SUGGESTIONS = "dont_repeat_suggestions"
     private const val KEY_PREFER_MUSIC_ONLY = "prefer_music_only"
+    /** Legacy switch migrated into [HomeProvider.APPLE]. */
     private const val KEY_APPLE_CATALOG_ENABLED = "apple_catalog_enabled"
     private const val KEY_SMART_VERSION_ALIGNMENT = "smart_version_alignment"
     private const val KEY_REDUCE_BLUR = "reduce_dynamic_blur"

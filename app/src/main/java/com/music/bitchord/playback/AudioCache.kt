@@ -1142,7 +1142,13 @@ object AudioCache {
                 // a substitute and must not pass through the YouTube resolution
                 // below, which would write a different recording's bytes under
                 // an entry this track owns.
-                if (SourceRegistry.parseTrackKey(next) != null) {
+                val appleSourceId = head.uri
+                    ?.takeIf { Uri.parse(it).authority == "source" }
+                    ?.let { Uri.parse(it).getQueryParameter("s") }
+                val directApple = AppSettings.appleRichModeEnabled &&
+                    appleSourceId != null &&
+                    SourceRegistry.isAppleStrictRouting(appleSourceId)
+                if (SourceRegistry.parseTrackKey(next) != null || directApple) {
                     // The opening goes now, not after the settle delay: it is
                     // what the analysis of the incoming track reads, and it is
                     // what the hand-over starts from. The settle delay is about
@@ -1189,7 +1195,9 @@ object AudioCache {
                     // Apple rows are strict. Their read-ahead must not pin a
                     // name-matched copy from another source before the exact
                     // Apple song id has been opened.
-                    !SourceRegistry.isAppleTrack(next)
+                    !SourceRegistry.isAppleStrictRouting(
+                        SourceRegistry.parseTrackKey(next)?.first.orEmpty(),
+                    )
                 ) {
                     // Announced before the search, not after: the player opens
                     // a queue's next item before it is reached, and that open
@@ -1414,9 +1422,7 @@ object AudioCache {
         val serving = SourceRegistry.parseTrackKey(head.mediaId)?.first
         // Apple downloads are strict too: the local-upgrade path must not
         // replace their exact Apple recording with a metadata match elsewhere.
-        if (serving != null && SourceRegistry.config(serving)?.catalogRole ==
-            com.music.bitchord.data.sources.SourceCatalogRole.APPLE_MUSIC
-        ) return
+        if (serving != null && SourceRegistry.isAppleStrictRouting(serving)) return
         // A bit-exact copy has to be somewhere for the search to be worth
         // starting, and the source the file came from counts towards that
         // whatever rank the listener gave it.

@@ -268,6 +268,7 @@ fun encodeFlowSnapshot(songs: List<Song>): String =
         listOf(
             s.videoId, s.title, s.artist,
             s.albumName.orEmpty(), s.thumbnailUrl.orEmpty(),
+            s.appleCatalogId.orEmpty(), s.appleLookupError.orEmpty(),
         ).joinToString("\u001f") { it.replace("\u001e", " ").replace("\u001f", " ") }
     }
 
@@ -283,6 +284,8 @@ fun decodeFlowSnapshot(text: String): List<Song> {
             artist = f.getOrNull(2).orEmpty(),
             thumbnailUrl = f.getOrNull(4)?.takeIf { it.isNotBlank() },
             albumName = f.getOrNull(3)?.takeIf { it.isNotBlank() },
+            appleCatalogId = f.getOrNull(5)?.takeIf { it.isNotBlank() },
+            appleLookupError = f.getOrNull(6)?.takeIf { it.isNotBlank() },
         )
     }
 }

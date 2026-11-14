@@ -149,6 +149,15 @@ data class Song(    val videoId: String,
      * catalogue id for lyrics. The two ids are never interchangeable.
      */
     val appleCatalogId: String? = null,
+    /**
+     * Why this row could not be enriched with an exact Apple catalogue id.
+     *
+     * Present only while Apple Rich Mode is on and the Apple addon could not
+     * name the same recording. Playback must not silently replace such a row
+     * with another source, so the error travels with the row through queue,
+     * cache and history and is shown instead of pretending the track was found.
+     */
+    val appleLookupError: String? = null,
 ) {
     /** Legacy derived property: true if and only if [queueTier] is [QueueTier.AUTOPLAY]. */
     val fromAutoplay: Boolean get() = queueTier == QueueTier.AUTOPLAY
@@ -180,6 +189,7 @@ data class Song(    val videoId: String,
         playbackSourceType: PlaybackSourceType? = null,
         playbackSourceId: String? = null,
         appleCatalogId: String? = null,
+        appleLookupError: String? = null,
     ) : this(
         videoId = videoId,
         title = title,
@@ -207,6 +217,7 @@ data class Song(    val videoId: String,
         playbackSourceType = playbackSourceType,
         playbackSourceId = playbackSourceId,
         appleCatalogId = appleCatalogId,
+        appleLookupError = appleLookupError,
     )
 }
 
@@ -380,6 +391,11 @@ data class ShelfItem(
      * not a statement about popularity.
      */
     val popularity: Int? = null,
+    /**
+     * Apple's exact catalogue song id for this discovery row, when Apple Rich
+     * Mode enriched it while the shelf was created.
+     */
+    val appleCatalogId: String? = null,
 )
 
 /** The signed-in Google account, as YouTube Music reports it. */

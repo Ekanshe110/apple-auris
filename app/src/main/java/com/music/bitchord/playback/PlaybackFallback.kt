@@ -24,7 +24,7 @@ internal object PlaybackFallback {
             // stream is a failure, not permission to replace that recording
             // with a metadata-matched YouTube upload.
             val configId = parameter(uri, "s")
-            if (configId != null && SourceRegistry.isAppleRole(configId)) return false
+            if (configId != null && SourceRegistry.isAppleStrictRouting(configId)) return false
             return true
         }
         val rendition = parameter(uri, QualityUpgrade.MARKER)

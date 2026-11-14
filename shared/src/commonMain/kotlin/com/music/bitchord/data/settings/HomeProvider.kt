@@ -9,11 +9,10 @@ package com.music.bitchord.data.settings
  *
  *  - A home row is a *recommendation*, which one service or the other is better
  *    at. That is what this switches.
- *  - The audio for a row is played from whatever the source ranking picks —
- *    YouTube, an addon, a file on the device — exactly as it is today. A
- *    Spotify-sourced row still plays through the same path a YouTube-sourced
- *    one does, and its tracks are matched to it the same way an imported
- *    playlist's are.
+ *  - The audio for a row normally comes from whatever the source ranking picks
+ *    — YouTube, an addon, a file on the device. Apple Music is the exception:
+ *    discovery rows are enriched with an exact Apple catalogue id and then
+ *    played through the configured Apple addon.
  *  - The Library tab keeps showing the listener's own YouTube and device
  *    content whichever provider is selected, because that is their library
  *    rather than a feed.
@@ -38,6 +37,16 @@ enum class HomeProvider {
      * sign-in still shows music.
      */
     SPOTIFY,
+
+    /**
+     * Apple Music catalogue playback.
+     *
+     * Discovery rows may still come from Spotify or YouTube Music, but every
+     * row is enriched with its exact Apple catalogue id and opened through the
+     * configured Apple addon. This is the single persisted choice that enables
+     * Apple Rich Mode; there is no second master switch.
+     */
+    APPLE,
     ;
 
     /** Whether this provider can only be read by a signed-in listener. */

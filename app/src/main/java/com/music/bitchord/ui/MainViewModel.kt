@@ -13,6 +13,7 @@ import com.music.bitchord.auth.adjacentProfile
 import com.music.bitchord.data.AppAnnouncements
 import com.music.bitchord.data.AppUpdateChecker
 import com.music.bitchord.data.LocalMediaRepository
+import com.music.bitchord.data.apple.AppleEnrichment
 import com.music.bitchord.data.LikeState
 import com.music.bitchord.data.presence.AndroidPresence
 import com.music.bitchord.data.YtMusicRepository
@@ -36,6 +37,7 @@ import com.music.bitchord.data.spotify.SpotifyHomeSource
 import com.music.bitchord.data.settings.withoutBlockedArtists
 import com.music.bitchord.data.settings.withoutBlockedRecommendations
 import com.music.bitchord.data.innertube.Innertube
+import com.music.bitchord.data.innertube.InnertubeParser
 import com.music.bitchord.data.innertube.PlaybackTracker
 import com.music.bitchord.data.innertube.StreamResolver
 import com.music.bitchord.auth.CapturedSession
@@ -2353,7 +2355,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             _moodGenreShelves.value = YtMusicRepository.moodGenreShelves(item.browseId, item.params).fold(
                 onSuccess = { shelves ->
                     if (shelves.isEmpty()) UiState.Error(text(R.string.nothing_to_explore))
-                    else UiState.Success(shelves)
+                    else UiState.Success(enrichHomeShelves(shelves))
                 },
                 onFailure = { UiState.Error(it.friendly()) },
             )
@@ -2526,8 +2528,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun isCurrentHomeLoad(identity: String?, generation: Long) =
         identity == listenerKey() && generation == homeLoadGeneration.get()
 
-    private fun publishHomeShelves(shelves: List<HomeShelf>, prepend: Boolean = false) {
-        val visible = shelves.withoutBlockedArtists()
+    private suspend fun publishHomeShelves(shelves: List<HomeShelf>, prepend: Boolean = false) {
+        val visible = enrichHomeShelves(shelves).withoutBlockedArtists()
         val existing = _homeRaw.value
         if (prepend) {
             // YouTube's core home can also contain a stale "Recently played"
@@ -2543,6 +2545,37 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (added.isNotEmpty()) {
             _homeRaw.value = existing + added
             publishHome()
+        }
+    }
+
+    /**
+     * Enriches song cards while the feed is being built. A shelf card has no
+     * full [Song], so the lookup uses its title and credited artist and stores
+     * only the resulting Apple catalogue id on the card.
+     */
+    private suspend fun enrichHomeShelves(shelves: List<HomeShelf>): List<HomeShelf> {
+        val candidates = shelves.flatMap { shelf ->
+            shelf.items.mapNotNull { item ->
+                val videoId = item.videoId?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                Song(
+                    videoId = videoId,
+                    title = item.title,
+                    artist = InnertubeParser.artistFromSubtitle(item.subtitle),
+                    thumbnailUrl = item.thumbnailUrl,
+                )
+            }
+        }
+        if (candidates.isEmpty()) return shelves
+        val enriched = AppleEnrichment.enrich(candidates).associateBy { it.videoId }
+        return shelves.map { shelf ->
+            shelf.copy(
+                items = shelf.items.map { item ->
+                    val id = item.videoId
+                    if (id == null) item else item.copy(
+                        appleCatalogId = enriched[id]?.appleCatalogId,
+                    )
+                },
+            )
         }
     }
 
@@ -2706,10 +2739,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 // a liked track past the first page still reads as liked.
                 // The cache takes the first page now; the walk below appends
                 // the rest as it lands, so a force-stop never loses the list.
-                identity?.let { id -> LikedCache.write(id, page.likedSongs) }
-                page.likedContinuation?.let { token -> syncLikedMusic(identity, token) }
-                if (page.isEmpty) UiState.Error(text(R.string.library_empty))
-                else UiState.Success(page.copy(likedContinuation = null))
+                val enriched = page.copy(
+                    likedSongs = AppleEnrichment.enrich(page.likedSongs),
+                    librarySongs = AppleEnrichment.enrich(page.librarySongs),
+                )
+                identity?.let { id -> LikedCache.write(id, enriched.likedSongs) }
+                enriched.likedContinuation?.let { token -> syncLikedMusic(identity, token) }
+                if (enriched.isEmpty) UiState.Error(text(R.string.library_empty))
+                else UiState.Success(enriched.copy(likedContinuation = null))
             },
             onFailure = { UiState.Error(it.friendly()) },
         )
@@ -2764,7 +2801,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val next = YtMusicRepository.history().fold(
                 onSuccess = { songs ->
                     if (songs.isEmpty()) UiState.Error(text(R.string.history_empty))
-                    else UiState.Success(songs)
+                    else UiState.Success(AppleEnrichment.enrich(songs))
                 },
                 onFailure = { UiState.Error(it.friendly()) },
             )
@@ -2802,6 +2839,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 subtitle = listOfNotNull(fromTypeahead.song.artist).joinToString(" · "),
                 artworkUrl = fromTypeahead.song.thumbnailUrl,
                 entityType = EntityType.TRACK,
+                appleCatalogId = fromTypeahead.song.appleCatalogId,
             ))
             return
         }
@@ -2812,6 +2850,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 subtitle = listOfNotNull(fromTypeahead.song.artist).joinToString(" · "),
                 artworkUrl = fromTypeahead.song.thumbnailUrl,
                 entityType = EntityType.TRACK,
+                appleCatalogId = fromTypeahead.song.appleCatalogId,
             ))
             return
         }
@@ -2826,6 +2865,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 subtitle = listOfNotNull(topResult.song.artist).joinToString(" · "),
                 artworkUrl = topResult.song.thumbnailUrl,
                 entityType = EntityType.TRACK,
+                appleCatalogId = topResult.song.appleCatalogId,
             ))
         } else if (topResult is SearchResult.TopTrack) {
             recordEntity(SearchHistoryEntity(
@@ -2834,6 +2874,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 subtitle = listOfNotNull(topResult.song.artist).joinToString(" · "),
                 artworkUrl = topResult.song.thumbnailUrl,
                 entityType = EntityType.TRACK,
+                appleCatalogId = topResult.song.appleCatalogId,
             ))
         } else {
             // Fallback: record as a raw-text entity for backwards compatibility
@@ -3083,7 +3124,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     if (source == null) {
                         if (request.requestId == newestRequestId.get()) {
                             _results.value = UiState.Error(
-                                "Apple Music catalog is not configured. Mark an enabled addon as the Apple Music catalog source.",
+                                "Apple Music is not configured. Add an Apple Music addon and select it under Playback → Content source.",
                             )
                         }
                         return@collectLatest
@@ -3218,8 +3259,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (stillCurrent) {
                 next.onSuccess { page ->
                     val current = (_results.value as? UiState.Success)?.data.orEmpty()
-                    val merged = (current + page.rows).distinctBy(::searchResultKey)
-                        .withoutBlockedArtists()
+                    val merged = enrichSearchRows(
+                        (current + page.rows).distinctBy(::searchResultKey),
+                    ).withoutBlockedArtists()
                     searchCache.put(session.key, SearchCacheEntry(merged, page.continuation))
                     searchSession = session.copy(continuation = page.continuation)
                     _results.value = UiState.Success(merged)
@@ -3251,9 +3293,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (stillCurrent) {
                 next.onSuccess { page ->
                     val current = (_results.value as? UiState.Success)?.data.orEmpty()
-                    val merged = (current + page.rows)
-                        .distinctBy(::searchResultKey)
-                        .withoutBlockedArtists()
+                    val merged = enrichSearchRows(
+                        (current + page.rows).distinctBy(::searchResultKey),
+                    ).withoutBlockedArtists()
                     searchCache.put(session.key, SearchCacheEntry(merged, null, page.nextOffset))
                     searchSession = session.copy(nextOffset = page.nextOffset)
                     _results.value = UiState.Success(merged)
@@ -3339,7 +3381,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Caches and publishes the initial result page without waiting for later pages. */
-    private fun published(
+    private suspend fun published(
         page: YtMusicRepository.SearchPage,
         key: String,
         requestId: Long,
@@ -3362,7 +3404,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * next page is addressed — a continuation token for YouTube Music, an
      * offset for Spotify — and how the rows are made.
      */
-    private fun publishedRows(
+    private suspend fun publishedRows(
         rows: List<SearchResult>,
         continuation: String?,
         nextOffset: Int?,
@@ -3371,7 +3413,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         filter: SearchFilter,
         source: SearchSource,
     ): UiState<List<SearchResult>> {
-        val clean = rows.withoutBlockedArtists()
+        val clean = enrichSearchRows(rows).withoutBlockedArtists()
         if (clean.isEmpty()) return UiState.Error(text(R.string.no_results))
         searchCache.put(key, SearchCacheEntry(clean, continuation, nextOffset))
         searchSession = SearchSession(
@@ -3385,6 +3427,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         )
         prefetchTopResult(clean)
         return UiState.Success(clean)
+    }
+
+    /**
+     * Adds exact Apple catalogue ids to the track rows before they are cached
+     * or shown. The lookup happens in the catalogue pass, never when the row
+     * is opened.
+     */
+    private suspend fun enrichSearchRows(rows: List<SearchResult>): List<SearchResult> {
+        val songs = rows.mapNotNull { row ->
+            when (row) {
+                is SearchResult.TopTrack -> row.song
+                is SearchResult.Track -> row.song
+                is SearchResult.Browse -> null
+            }
+        }
+        if (songs.isEmpty()) return rows
+        val enriched = AppleEnrichment.enrich(songs).associateBy { it.videoId }
+        return rows.map { row ->
+            when (row) {
+                is SearchResult.TopTrack -> enriched[row.song.videoId]
+                    ?.let { SearchResult.TopTrack(it) } ?: row
+                is SearchResult.Track -> enriched[row.song.videoId]
+                    ?.let { SearchResult.Track(it) } ?: row
+                is SearchResult.Browse -> row
+            }
+        }
     }
 
     private fun searchResultKey(row: SearchResult): String = when (row) {
@@ -3731,7 +3799,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             ),
                         )
                     } else {
-                        UiState.Success(localPlaylist.songs)
+                        UiState.Success(AppleEnrichment.enrich(localPlaylist.songs))
                     }
                 }
                 remote != null -> remoteSongsState(remote)
@@ -3780,7 +3848,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             if (page.songs.isEmpty()) {
                                 UiState.Error(text(R.string.no_tracks_here))
                             } else {
-                                UiState.Success(page.songs.withArtwork(thumbnailUrl ?: artwork))
+                                UiState.Success(
+                                    AppleEnrichment.enrich(page.songs.withArtwork(thumbnailUrl ?: artwork)),
+                                )
                             }
                         },
                         onFailure = { UiState.Error(it.friendly()) },
@@ -3828,9 +3898,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                                 UiState.Error(text(R.string.no_tracks_here))
                             } else {
                                 more = page.continuation
-                                suggested = page.suggested.withArtwork(thumbnailUrl ?: artwork)
+                                suggested = AppleEnrichment.enrich(
+                                    page.suggested.withArtwork(thumbnailUrl ?: artwork),
+                                )
                                 library = page.library
-                                UiState.Success(page.songs.withArtwork(thumbnailUrl ?: artwork))
+                                UiState.Success(
+                                    AppleEnrichment.enrich(page.songs.withArtwork(thumbnailUrl ?: artwork)),
+                                )
                             }
                         },
                         onFailure = { UiState.Error(it.friendly()) },
@@ -4072,8 +4146,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         // had not found was a playlist that could not be
                         // played, when the only thing that had failed was a
                         // lookup done before the row was ever pressed.
-                        val found = match?.copy(thumbnailUrl = match.thumbnailUrl ?: track.imageUrl)
-                            ?: SpotifyHomeSource.songFor(track)
+                        val found = AppleEnrichment.enrich(
+                            listOf(
+                                match?.copy(thumbnailUrl = match.thumbnailUrl ?: track.imageUrl)
+                                    ?: SpotifyHomeSource.songFor(track),
+                            ),
+                        ).first()
                         // The Spotify id behind the row, remembered wherever the
                         // row came from. The station a listener starts from this
                         // track is asked for by that id, and a row matched on the
@@ -4107,7 +4185,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             ),
                         )
                     } else {
-                        UiState.Success(localPlaylist.songs)
+                        UiState.Success(AppleEnrichment.enrich(localPlaylist.songs))
                     }
                 }
                 remote != null -> remoteSongsState(remote)
@@ -4931,7 +5009,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         relatedTracks: (suspend (Song) -> List<Song>)? = null,
     ): List<Song> {
         val buffer = if (AppSettings.blockedArtists.value.isEmpty()) 0 else 12
-        return FlowEngine.buildInitialQueue(
+        val built = FlowEngine.buildInitialQueue(
             seeds = seeds,
             likeStatuses = likeStatuses.value,
             bannedIds = FlowStore.bannedIds.value,
@@ -4941,6 +5019,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             genreOf = ::flowGenreOf,
             relatedTracks = relatedTracks,
         ).withoutBlockedArtists().distinctBy { it.videoId }.take(limit)
+        return AppleEnrichment.enrich(built)
     }
 
     /**

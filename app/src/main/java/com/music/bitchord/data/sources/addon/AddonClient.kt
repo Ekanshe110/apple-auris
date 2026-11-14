@@ -55,6 +55,7 @@ class AddonClient(
     private val manifests = SharedCalls<AddonManifest>(MANIFEST_TTL_MS, calls, ::logReuse)
     private val searches = SharedCalls<AddonSearchResponse>(SEARCH_TTL_MS, calls, ::logReuse)
     private val streams = SharedCalls<AddonStream>(STREAM_TTL_MS, calls, ::logReuse)
+    private val libraryPages = SharedCalls<AddonLibraryPage>(LIBRARY_TTL_MS, calls, ::logReuse)
 
     private fun logReuse(line: String) = TrackLog.d(TAG, line)
 
@@ -296,12 +297,19 @@ class AddonClient(
     private suspend fun fetchLibraryPage(
         url: String,
         headers: Map<String, String>,
-    ): Result<AddonLibraryPage> = runCatching {
-        val text = body(url, headers = headers, allowEmpty = true)
-        json.decodeFromString<AddonLibraryPage>(text.ifBlank { "{}" })
-    }.onFailure { failure ->
-        if (failure is CancellationException) throw failure
-        TrackLog.w(TAG, "  ✗ addon library call failed ${redact(url)}: ${failure.message}")
+    ): Result<AddonLibraryPage> = libraryPages.get(
+        // The credential is part of the identity, but never part of the key in
+        // readable form. Two linked accounts must not share a cached page.
+        key = "$url|${headers.hashCode()}",
+        describe = { "▶ addon library page(${redact(url)})" },
+    ) {
+        runCatching {
+            val text = body(url, headers = headers, allowEmpty = true)
+            json.decodeFromString<AddonLibraryPage>(text.ifBlank { "{}" })
+        }.onFailure { failure ->
+            if (failure is CancellationException) throw failure
+            TrackLog.w(TAG, "  ✗ addon library call failed ${redact(url)}: ${failure.message}")
+        }
     }
 
     // ── Search ────────────────────────────────────────────────────────────
@@ -785,6 +793,9 @@ class AddonClient(
          * look arriving at the same track moments later.
          */
         const val STREAM_TTL_MS = 5 * 60 * 1000L
+
+        /** Account-library pages change less often than streams and are paged. */
+        const val LIBRARY_TTL_MS = 5 * 60 * 1000L
 
         private const val MAX_RETRIES = 2
         private const val BACKOFF_BASE_MS = 500L

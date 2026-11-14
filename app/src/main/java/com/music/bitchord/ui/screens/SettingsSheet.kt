@@ -282,7 +282,6 @@ fun SettingsScreen(
     val swipeToPlayNext by AppSettings.swipeToPlayNext.collectAsStateWithLifecycle()
     val dontRepeatSuggestions by AppSettings.dontRepeatSuggestions.collectAsStateWithLifecycle()
     val preferMusicOnly by AppSettings.preferMusicOnly.collectAsStateWithLifecycle()
-    val appleCatalogEnabled by AppSettings.appleCatalogEnabled.collectAsStateWithLifecycle()
     val smartVersionAlignment by AppSettings.smartVersionAlignment.collectAsStateWithLifecycle()
     val filterNonMusicAudio by AppSettings.filterNonMusicAudio.collectAsStateWithLifecycle()
     val localMusicFolderUri by AppSettings.localMusicFolderUri.collectAsStateWithLifecycle()
@@ -604,23 +603,6 @@ fun SettingsScreen(
                     onClick = onSources,
                 )
             }
-            row("Use Apple Music catalog", "apple music", "catalog") {
-                SettingsRow(
-                    icon = Icons.Rounded.LibraryMusic,
-                    title = "Use Apple Music catalog",
-                    trailing = {
-                        Switch(
-                            checked = appleCatalogEnabled,
-                            onCheckedChange = AppSettings::setAppleCatalogEnabled,
-                            colors = SwitchDefaults.colors(
-                                checkedTrackColor = MaterialTheme.colorScheme.primary,
-                                checkedBorderColor = MaterialTheme.colorScheme.primary,
-                            ),
-                        )
-                    },
-                    onClick = { AppSettings.setAppleCatalogEnabled(!appleCatalogEnabled) },
-                )
-            }
             // Sits here because it overrides what the two rows beneath decide,
             // and next to them so the relationship is visible: this says which
             // copy plays, they say how good the streamed one may be.
@@ -929,11 +911,10 @@ fun SettingsScreen(
                     onClick = { pickingAutomixPerformance = true },
                 )
             }
-            // The provider, next to the other decisions about how the app picks
-            // music for the listener. It sits here rather than with the account
-            // rows because it is a choice about the feed, not about a service
-            // connection — Spotify selected with nobody signed in still shows a
-            // home, from Spotify's public lists.
+            // The content source, next to the other decisions about how the app
+            // picks music for the listener. YouTube Music and Spotify build
+            // discovery feeds; Apple Music keeps discovery on those catalogues
+            // but routes enriched rows through the Apple addon.
             val homeProviderTitle = stringResource(R.string.home_provider)
             row(homeProviderTitle, "provider", "spotify", "youtube", "algorithm", "flow") {
                 SettingsRow(
@@ -2616,19 +2597,18 @@ private fun AutomixPerformanceMode.localizedLabel(): String = stringResource(
 
 /** The selected content provider, as the settings row shows it. */
 @Composable
-private fun HomeProvider.localizedLabel(): String = stringResource(
-    when (this) {
-        HomeProvider.YOUTUBE -> R.string.home_provider_youtube
-        HomeProvider.SPOTIFY -> R.string.spotify
-    },
-)
+private fun HomeProvider.localizedLabel(): String = when (this) {
+    HomeProvider.YOUTUBE -> stringResource(R.string.home_provider_youtube)
+    HomeProvider.SPOTIFY -> stringResource(R.string.spotify)
+    HomeProvider.APPLE -> "Apple Music"
+}
 
 /**
  * Content-provider picker: which service's algorithm builds the homepage,
  * Flow and Autoplay.
  *
- * Two rows now and room for more, which is why this is a list rather than a
- * switch: a third provider is a row and an enum value, not a redesign.
+ * Three rows now and room for more, which is why this is a list rather than a
+ * switch: another provider is a row and an enum value, not a redesign.
  *
  * The note at the top says the app restarts, and it is not a warning to be
  * scrolled past — it is the mechanism. Flow and Autoplay each carry learning
@@ -2678,12 +2658,12 @@ private fun HomeProviderSheet(
                         color = MaterialTheme.colorScheme.onBackground,
                     )
                     Text(
-                        text = stringResource(
-                            when (provider) {
-                                HomeProvider.YOUTUBE -> R.string.home_provider_youtube_subtitle
-                                HomeProvider.SPOTIFY -> R.string.home_provider_spotify_subtitle
-                            },
-                        ),
+                        text = when (provider) {
+                            HomeProvider.YOUTUBE -> stringResource(R.string.home_provider_youtube_subtitle)
+                            HomeProvider.SPOTIFY -> stringResource(R.string.home_provider_spotify_subtitle)
+                            HomeProvider.APPLE ->
+                                "Apple catalogue playback; discovery stays with Spotify or YouTube Music"
+                        },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

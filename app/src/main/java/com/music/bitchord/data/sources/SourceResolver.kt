@@ -156,8 +156,7 @@ object SourceResolver {
     ): SourceStream? {
         val request = requestForNow()
         val active = SourceRegistry.activeForPlayback()
-        val appleRole = SourceRegistry.config(configId)?.catalogRole ==
-            com.music.bitchord.data.sources.SourceCatalogRole.APPLE_MUSIC
+        val appleRole = SourceRegistry.isAppleStrictRouting(configId)
         if (appleRole) {
             // Apple rows are strict by contract. Their song id names one
             // recording on one Apple addon; a lossless lookup or a failed
@@ -169,7 +168,7 @@ object SourceResolver {
                     ?.copy(sourceConfigId = it.configId)
             }
         }
-        val generic = active.filterNot { SourceRegistry.isAppleRole(it.configId) }
+        val generic = active.filterNot { SourceRegistry.isAppleStrictRouting(it.configId) }
         // A pin identifies where the row originally came from; it does not
         // override the source switch. Looking the instance up directly used to
         // reopen disabled JioSaavn/addon tracks already sitting in the queue.
@@ -494,9 +493,7 @@ object SourceResolver {
                     return stream
                 }
             }
-            if (SourceRegistry.config(configId)?.catalogRole ==
-                com.music.bitchord.data.sources.SourceCatalogRole.APPLE_MUSIC
-            ) {
+            if (SourceRegistry.isAppleStrictRouting(configId)) {
                 // An Apple recording may not be replaced by a name-matched
                 // recording from another source.
                 return null
@@ -598,8 +595,7 @@ object SourceResolver {
         val request = requestForNow()
         val active = SourceRegistry.activeForPlayback()
         if (strictConfigId != null && strictTrackId != null &&
-            SourceRegistry.config(strictConfigId)?.catalogRole ==
-            com.music.bitchord.data.sources.SourceCatalogRole.APPLE_MUSIC
+            SourceRegistry.isAppleStrictRouting(strictConfigId)
         ) {
             val exact = active.firstOrNull { it.configId == strictConfigId } ?: return null
             return attempt(exact) { exact.stream(strictTrackId, request) }
@@ -1100,7 +1096,7 @@ object SourceResolver {
     ): List<MusicSource> {
         if (!reaskServedBy) {
             return candidates.filterNot {
-                it.configId == servedBy || SourceRegistry.isAppleRole(it.configId)
+                it.configId == servedBy || SourceRegistry.isAppleStrictRouting(it.configId)
             }
         }
         // The serving source is put back only if it can serve audio at all: a
@@ -1109,7 +1105,7 @@ object SourceResolver {
         // told what was already known.
         val serving = servedBy?.let { id ->
             active.firstOrNull {
-                it.configId == id && it.servesAudio && !SourceRegistry.isAppleRole(it.configId)
+                it.configId == id && it.servesAudio && !SourceRegistry.isAppleStrictRouting(it.configId)
             }
         }
         return if (serving != null && serving !in candidates) candidates + serving else candidates
@@ -1133,7 +1129,7 @@ object SourceResolver {
     internal fun candidatesForYouTube(active: List<MusicSource>): List<MusicSource> {
         val at = active.indexOfFirst { it.kind == SourceKind.YOUTUBE }
         val ranked = if (at < 0) active else active.take(at)
-        return ranked.filter { it.servesAudio && !SourceRegistry.isAppleRole(it.configId) }
+        return ranked.filter { it.servesAudio && !SourceRegistry.isAppleStrictRouting(it.configId) }
     }
 
     /**

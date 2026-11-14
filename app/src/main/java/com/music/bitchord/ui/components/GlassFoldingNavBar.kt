@@ -29,11 +29,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.union
@@ -60,7 +57,6 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -89,7 +85,6 @@ import com.music.bitchord.ui.player.PlayerDock
 import kotlinx.coroutines.delay
 
 private val NavBarShape = RoundedCornerShape(percent = 50)
-private val NavBarSearchBarHeight = 48.dp
 private val NavBarRowHeight = 68.dp
 private const val KeyboardOpenDelayMs = 220L
 
@@ -114,69 +109,26 @@ fun GlassFoldingNavBar(
     pull: MiniPlayerPull? = null,
     modifier: Modifier = Modifier,
 ) {
-    AnimatedContent(
-        targetState = search.keyboardActive,
-        modifier = modifier,
-        transitionSpec = {
-            if (targetState) {
-                (slideInVertically(
-                    animationSpec = spring(
-                        dampingRatio = Spring.DampingRatioMediumBouncy,
-                        stiffness = Spring.StiffnessMedium,
-                    ),
-                ) { it / 2 } + fadeIn()) togetherWith
-                    (slideOutVertically(
-                        animationSpec = spring(
-                            dampingRatio = Spring.DampingRatioNoBouncy,
-                            stiffness = Spring.StiffnessMedium,
-                        ),
-                    ) { it } + fadeOut())
-            } else {
-                (slideInVertically(
-                    animationSpec = spring(
-                        dampingRatio = Spring.DampingRatioMediumBouncy,
-                        stiffness = Spring.StiffnessMedium,
-                    ),
-                ) { it } + fadeIn()) togetherWith
-                    (slideOutVertically(
-                        animationSpec = spring(
-                            dampingRatio = Spring.DampingRatioNoBouncy,
-                            stiffness = Spring.StiffnessMedium,
-                        ),
-                    ) { it / 2 } + fadeOut())
-            }
-        },
-        label = "glassFoldingNavSearchKeyboard",
-    ) { keyboardActive ->
-        if (keyboardActive) {
-            NavBarSearchInputBar(
-                state = search,
-                placeholder = placeholder,
-                modifier = Modifier.fillMaxWidth(),
-            )
-        } else {
-            GlassFoldingNavBarChrome(
-                tabs = tabs,
-                selectedIndex = selectedIndex,
-                onTabSelected = onTabSelected,
-                scrollConnection = scrollConnection,
-                search = search,
-                placeholder = placeholder,
-                song = song,
-                isPlaying = isPlaying,
-                isLoading = isLoading,
-                onPlayPause = onPlayPause,
-                onNext = onNext,
-                onPrevious = onPrevious,
-                onExpand = onExpand,
-                controlsLocked = controlsLocked,
-                onBlockedControl = onBlockedControl,
-                dock = dock,
-                pull = pull,
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
-    }
+    GlassFoldingNavBarChrome(
+        tabs = tabs,
+        selectedIndex = selectedIndex,
+        onTabSelected = onTabSelected,
+        scrollConnection = scrollConnection,
+        search = search,
+        placeholder = placeholder,
+        song = song,
+        isPlaying = isPlaying,
+        isLoading = isLoading,
+        onPlayPause = onPlayPause,
+        onNext = onNext,
+        onPrevious = onPrevious,
+        onExpand = onExpand,
+        controlsLocked = controlsLocked,
+        onBlockedControl = onBlockedControl,
+        dock = dock,
+        pull = pull,
+        modifier = modifier.fillMaxWidth(),
+    )
 }
 
 @Composable
@@ -200,9 +152,23 @@ private fun GlassFoldingNavBarChrome(
     pull: MiniPlayerPull?,
     modifier: Modifier,
 ) {
-    BackHandler(enabled = search.visualActive, onBack = search.onExit)
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    BackHandler(enabled = search.visualActive) {
+        if (search.keyboardActive) {
+            focusManager.clearFocus()
+            keyboardController?.hide()
+            search.onCloseKeyboard()
+        } else {
+            search.onExit()
+        }
+    }
 
     val contentColor = glassContentColor()
+    // The parent glass container owns the IME lift. While the keyboard is
+    // visible, adding the navigation-bar inset here would float the whole
+    // search/player stack one gesture-bar height above the keyboard.
+    val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     // Selected tab is Apple's systemRed, not the glass ink — see GlassTintTokens.
     val selectedColor = com.music.bitchord.ui.theme.GlassTintTokens.selectedRedColor(glassUsesDarkAppearance())
     val unselectedColor = contentColor.copy(alpha = 0.65f)
@@ -222,7 +188,14 @@ private fun GlassFoldingNavBarChrome(
                     onPlayPause = onPlayPause,
                     onNext = onNext,
                     onPrevious = onPrevious,
-                    onExpand = onExpand,
+                    onExpand = {
+                        if (search.keyboardActive) {
+                            focusManager.clearFocus()
+                            keyboardController?.hide()
+                            search.onCloseKeyboard()
+                        }
+                        onExpand()
+                    },
                     controlsLocked = controlsLocked,
                     onBlockedControl = onBlockedControl,
                     dock = dock,
@@ -253,20 +226,73 @@ private fun GlassFoldingNavBarChrome(
             expandedElevation = 0.dp,
         ),
         modifier = modifier
-            .windowInsetsPadding(
-                WindowInsets.navigationBars.union(WindowInsets(bottom = 15.dp)),
+            .then(
+                if (imeVisible) {
+                    Modifier
+                } else {
+                    Modifier.windowInsetsPadding(
+                        WindowInsets.navigationBars.union(WindowInsets(bottom = 15.dp)),
+                    )
+                },
             )
             .padding(horizontal = BAR_GUTTER)
             .padding(bottom = 2.dp),
         accessory = playerAccessory,
         searchMode = search.visualActive,
         searchBarContent = { contentModifier ->
-            SearchBarPlaceholder(
-                state = search,
-                placeholder = placeholder,
-                contentColor = contentColor,
+            // Only the field changes. The folding tree, its search surface and
+            // the now-playing accessory stay composed, so opening the keyboard
+            // moves the search row and mini-player as one stable stack rather
+            // than replacing the whole bar with a field and losing the player.
+            AnimatedContent(
+                targetState = search.keyboardActive,
                 modifier = contentModifier,
-            )
+                transitionSpec = {
+                    if (targetState) {
+                        (slideInVertically(
+                            animationSpec = spring(
+                                dampingRatio = Spring.DampingRatioMediumBouncy,
+                                stiffness = Spring.StiffnessMedium,
+                            ),
+                        ) { it / 2 } + fadeIn()) togetherWith
+                            (slideOutVertically(
+                                animationSpec = spring(
+                                    dampingRatio = Spring.DampingRatioNoBouncy,
+                                    stiffness = Spring.StiffnessMedium,
+                                ),
+                            ) { it } + fadeOut())
+                    } else {
+                        (slideInVertically(
+                            animationSpec = spring(
+                                dampingRatio = Spring.DampingRatioMediumBouncy,
+                                stiffness = Spring.StiffnessMedium,
+                            ),
+                        ) { it } + fadeIn()) togetherWith
+                            (slideOutVertically(
+                                animationSpec = spring(
+                                    dampingRatio = Spring.DampingRatioNoBouncy,
+                                    stiffness = Spring.StiffnessMedium,
+                                ),
+                            ) { it / 2 } + fadeOut())
+                    }
+                },
+                label = "glassFoldingNavSearchField",
+            ) { editing ->
+                if (editing) {
+                    NavBarSearchInputBar(
+                        state = search,
+                        placeholder = placeholder,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
+                    SearchBarPlaceholder(
+                        state = search,
+                        placeholder = placeholder,
+                        contentColor = contentColor,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            }
         },
         expandedTabs = { foldingTabs, surfaceBackdrop ->
             // FoldingTabGroup samples this lambda from a LaunchedEffect started
@@ -441,17 +467,6 @@ private fun NavBarSearchInputBar(
     val contentColor = glassContentColor()
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
-    // imePadding already lifts the bar clear of the keyboard. The navigation
-    // bar inset is still reported while the IME is up, and adding it on top
-    // floated the field a gesture-bar's height above the keyboard instead of
-    // docking it. Keep the gesture inset only when no keyboard is showing.
-    val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
-
-    BackHandler {
-        focusManager.clearFocus()
-        keyboardController?.hide()
-        state.onCloseKeyboard()
-    }
 
     LaunchedEffect(Unit) {
         delay(KeyboardOpenDelayMs)
@@ -460,25 +475,17 @@ private fun NavBarSearchInputBar(
 
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = modifier
-            .imePadding()
-            .then(if (imeVisible) Modifier else Modifier.navigationBarsPadding())
-            .padding(horizontal = 16.dp)
-            .padding(top = 6.dp, bottom = if (imeVisible) 0.dp else 2.dp)
-            .height(NavBarSearchBarHeight)
-            .clip(NavBarShape)
-            .liquidGlass(shape = NavBarShape)
-            .padding(start = 11.dp, end = 10.dp),
+        modifier = modifier.padding(horizontal = 4.dp),
     ) {
         Box(
             modifier = Modifier
-                .size(48.dp)
+                .size(40.dp)
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
                     onClick = state.onExit,
                 )
-                .padding(12.dp),
+                .padding(8.dp),
         ) {
             Icon(
                 imageVector = Icons.Rounded.ArrowBack,
@@ -524,13 +531,13 @@ private fun NavBarSearchInputBar(
         if (state.query.isNotEmpty()) {
             Box(
                 modifier = Modifier
-                    .size(48.dp)
+                    .size(40.dp)
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
                         onClick = { state.onQueryChange("") },
                     )
-                    .padding(12.dp),
+                    .padding(9.dp),
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Close,
@@ -543,13 +550,13 @@ private fun NavBarSearchInputBar(
         if (state.canToggleSource) {
             Box(
                 modifier = Modifier
-                    .size(48.dp)
+                    .size(40.dp)
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
                         onClick = state.onToggleSource,
                     )
-                    .padding(12.dp),
+                    .padding(9.dp),
             ) {
                 Icon(
                     imageVector = when (state.searchSource) {

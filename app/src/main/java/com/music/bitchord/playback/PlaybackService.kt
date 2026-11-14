@@ -1820,6 +1820,18 @@ class PlaybackService : MediaLibraryService() {
             // source supplies the bytes. A track none of them holds is a track
             // that cannot play, and it says so instead of playing silence.
             if (videoId.startsWith(SPOTIFY_ROW_PREFIX)) {
+                // In Apple Rich Mode a Spotify catalogue row reaches playback
+                // with its exact Apple id already attached. `Song.toMediaItem`
+                // then builds a source URI and the branch above resolves it
+                // directly. Reaching this branch means that id was missing —
+                // enrichment failed, or an old queue item was restored without
+                // it. Do not fall through to name-based Spotify/YouTube
+                // matching: that can silently choose a different recording.
+                if (AppSettings.appleRichModeEnabled) {
+                    throw java.io.IOException(
+                        "Apple Music catalogue id is unavailable for '${SourceResolver.targetIn(dataSpec.uri).title}'",
+                    )
+                }
                 // The pin: the copy already chosen for this row.
                 //
                 // Every writer for a catalogue row — the player's own open,

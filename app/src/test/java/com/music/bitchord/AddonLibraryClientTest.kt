@@ -110,6 +110,18 @@ class AddonLibraryClientTest {
     }
 
     @Test
+    fun `library page is cached for the session`() = runBlocking {
+        server.enqueue(json(manifestJson))
+        server.enqueue(json("""{"items":[],"offset":0,"limit":25,"hasMore":false}"""))
+
+        val client = AddonClient(server.url("/").toString(), libraryCredential = "secret-token")
+        client.libraryPlaylists().getOrThrow()
+        client.libraryPlaylists().getOrThrow()
+
+        assertEquals(2, server.requestCount)
+    }
+
+    @Test
     fun `signed out authentication error preserves machine readable code`() = runBlocking {
         server.enqueue(json(manifestJson))
         server.enqueue(

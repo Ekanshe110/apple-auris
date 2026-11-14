@@ -147,6 +147,7 @@ fun encodeLikedRows(songs: List<Song>): String =
             // liked song on the disk still played as a stream from cache —
             // and the download badge could not be shown.
             s.localUri.orEmpty(), s.downloadFormat.orEmpty(),
+            s.appleCatalogId.orEmpty(), s.appleLookupError.orEmpty(),
         ).joinToString("\u001f") { it.replace("\u001e", " ").replace("\u001f", " ") }
     }
 
@@ -169,6 +170,8 @@ fun decodeLikedRows(text: String): List<Song> {
             // and the next write fills them in.
             localUri = f.getOrNull(7)?.takeIf { it.isNotBlank() },
             downloadFormat = f.getOrNull(8)?.takeIf { it.isNotBlank() },
+            appleCatalogId = f.getOrNull(9)?.takeIf { it.isNotBlank() },
+            appleLookupError = f.getOrNull(10)?.takeIf { it.isNotBlank() },
         )
     }
 }

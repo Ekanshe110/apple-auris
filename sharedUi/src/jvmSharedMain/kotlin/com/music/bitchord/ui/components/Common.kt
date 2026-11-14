@@ -561,6 +561,16 @@ private fun SongRowContent(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            song.appleLookupError?.let { error ->
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = error,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
         if (downloadedTint != null) {
             DownloadedBadge(song.videoId, downloadedTint)

@@ -1,6 +1,7 @@
 package com.music.bitchord.data.spotify
 
 import com.music.bitchord.data.DebugLog as Log
+import com.music.bitchord.data.apple.AppleEnrichment
 import com.music.bitchord.data.canvas.SpotifyToken
 import com.music.bitchord.data.model.HomeChip
 import com.music.bitchord.data.model.HomeHeader
@@ -471,7 +472,7 @@ internal object SpotifyHomeSource {
 
     /** The playable songs behind [tracks], for a seed pool. */
     private suspend fun songs(tracks: List<SpotifyTrack>): List<Song> =
-        matched(tracks).map { (_, song) -> song }
+        AppleEnrichment.enrich(matched(tracks).map { (_, song) -> song })
 
     /**
      * The playable songs behind [tracks], for a search.
@@ -483,7 +484,7 @@ internal object SpotifyHomeSource {
      * is playing.
      */
     internal suspend fun matchTracks(tracks: List<SpotifyTrack>): List<Song> =
-        matched(tracks).map { (_, song) -> song }
+        AppleEnrichment.enrich(matched(tracks).map { (_, song) -> song })
 
     /**
      * A Spotify row as a queue entry of its own.

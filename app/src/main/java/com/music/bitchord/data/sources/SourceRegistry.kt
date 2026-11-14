@@ -321,7 +321,7 @@ object SourceRegistry {
 
     /** Download sources eligible for metadata matching; exact Apple rows are excluded. */
     fun activeForGenericDownload(): List<MusicSource> =
-        activeForDownload().filterNot { isAppleRole(it.configId) }
+        activeForDownload().filterNot { isAppleStrictRouting(it.configId) }
 
     /**
      * Records what an addon's manifest said about downloads and lossless
@@ -331,17 +331,37 @@ object SourceRegistry {
      * because nothing about where it points has changed, and this is called
      * from inside that source's own requests.
      */
-    fun updatePolicy(configId: String, allowDownloads: Boolean, checkValidLossless: Boolean) {
+    fun updatePolicy(
+        configId: String,
+        allowDownloads: Boolean,
+        checkValidLossless: Boolean,
+        catalogRole: SourceCatalogRole? = null,
+    ) {
         val current = config(configId) ?: return
-        if (current.allowDownloads == allowDownloads && current.checkValidLossless == checkValidLossless) return
+        if (
+            current.allowDownloads == allowDownloads &&
+            current.checkValidLossless == checkValidLossless &&
+            (catalogRole == null || current.catalogRole == catalogRole)
+        ) return
         TrackLog.d(
             TAG,
             "${current.displayName}: manifest now says allowDownloads=$allowDownloads " +
-                "checkValidLossless=$checkValidLossless",
+                "checkValidLossless=$checkValidLossless" +
+                (catalogRole?.let { " catalogRole=$it" } ?: ""),
         )
         publish(
-            configs.value.map {
-                if (it.id == configId) it.copy(allowDownloads = allowDownloads, checkValidLossless = checkValidLossless) else it
+            configs.value.map { config ->
+                when {
+                    config.id == configId -> config.copy(
+                        allowDownloads = allowDownloads,
+                        checkValidLossless = checkValidLossless,
+                        catalogRole = catalogRole ?: config.catalogRole,
+                    )
+                    catalogRole == SourceCatalogRole.APPLE_MUSIC &&
+                        config.catalogRole == SourceCatalogRole.APPLE_MUSIC ->
+                        config.copy(catalogRole = SourceCatalogRole.GENERIC)
+                    else -> config
+                }
             },
         )
     }
@@ -374,11 +394,21 @@ object SourceRegistry {
      * only and must never be found by title, artist or duration.
      */
     fun activeForGenericPlayback(): List<MusicSource> =
-        activeForPlayback().filterNot { isAppleRole(it.configId) }
+        activeForPlayback().filterNot { isAppleStrictRouting(it.configId) }
 
     /** Whether [configId] is the explicitly configured Apple Music source. */
     fun isAppleRole(configId: String): Boolean =
         config(configId)?.catalogRole == SourceCatalogRole.APPLE_MUSIC
+
+    /**
+     * Whether this source must be opened by its exact Apple song id.
+     *
+     * The role stays attached to the addon while the master switch is off, but
+     * strict routing is a feature of Apple Rich Mode. With the switch off the
+     * addon keeps its old generic-source behaviour, as every other addon does.
+     */
+    fun isAppleStrictRouting(configId: String): Boolean =
+        AppSettings.appleRichModeEnabled && isAppleRole(configId)
 
     fun instance(configId: String): MusicSource? = instances[configId]
 
@@ -457,7 +487,6 @@ object SourceRegistry {
      */
     private fun SourceConfig.tidied(): SourceConfig = when {
         kind == SourceKind.ADDON -> copy(baseUrl = AddonClient.normalizeBase(baseUrl))
-        catalogRole != SourceCatalogRole.GENERIC -> copy(catalogRole = SourceCatalogRole.GENERIC)
         else -> this
     }
 
@@ -516,13 +545,15 @@ object SourceRegistry {
     }
 
     /** The enabled Apple Music addon, chosen in the user's source order. */
-    fun appleCatalogConfig(): SourceConfig? =
-        configs.value.firstOrNull {
+    fun appleCatalogConfig(): SourceConfig? {
+        if (!AppSettings.appleRichModeEnabled) return null
+        return configs.value.firstOrNull {
             it.kind == SourceKind.ADDON &&
                 it.enabled &&
                 it.isComplete &&
                 it.catalogRole == SourceCatalogRole.APPLE_MUSIC
         }
+    }
 
     /** Whether [mediaId] names a track from the explicitly configured Apple source. */
     fun isAppleTrack(mediaId: String): Boolean {
@@ -687,6 +718,16 @@ object SourceRegistry {
                     label = detected.manifest.displayName,
                     allowDownloads = detected.manifest.downloadsAllowed,
                     checkValidLossless = detected.manifest.requiresLosslessOutput,
+                    // The manifest is the source of truth for vendor identity.
+                    // The role is managed internally; the listener no longer
+                    // chooses it from a second editor switch.
+                    catalogRole = when {
+                        detected.manifest.library?.isAppleMusic == true ->
+                            SourceCatalogRole.APPLE_MUSIC
+                        detected.manifest.library?.provider?.isNotBlank() == true ->
+                            SourceCatalogRole.GENERIC
+                        else -> existing?.catalogRole ?: SourceCatalogRole.GENERIC
+                    },
                 ),
             )
             is DetectedFormat.ModuleIndex -> Result.success(

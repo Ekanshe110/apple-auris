@@ -43,7 +43,6 @@ at once.
 
 ### Audio quality
 - [x] `audio.source` — Sources
-- [x] `audio.apple_catalog` — Use Apple Music catalog
 - [x] `audio.offline_mode` — Offline mode
 - [x] `audio.wifi` — On Wi-Fi
 - [x] `audio.mobile_data` — On mobile data
@@ -58,6 +57,7 @@ at once.
 - [x] `audio.jamesdsp` — JamesDSP
 
 ### Playback
+- [x] `playback.content_source` — Content source (YouTube Music, Spotify, Apple Music)
 - [x] `playback.prefer_music_only` — Prefer music only
 - [x] `playback.crossfade` — Crossfade
 - [x] `playback.automix` — Automix

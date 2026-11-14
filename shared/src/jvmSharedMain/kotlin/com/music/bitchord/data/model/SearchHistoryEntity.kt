@@ -24,6 +24,8 @@ data class SearchHistoryEntity(
     val entityType: EntityType,
     /** Timestamp (epoch millis) — updated on each re-tap to bubble it to the top. */
     val timestamp: Long = System.currentTimeMillis(),
+    /** Exact Apple catalogue id for a track row, when it was enriched. */
+    val appleCatalogId: String? = null,
 )
 
 enum class EntityType {

@@ -31,6 +31,7 @@ import com.music.bitchord.data.model.QueueTier
 import com.music.bitchord.data.model.Song
 import com.music.bitchord.data.model.artworkAt
 import com.music.bitchord.data.model.durationMillis
+import com.music.bitchord.data.settings.AppSettings
 import com.music.bitchord.data.sources.SourceRegistry
 import com.music.bitchord.data.sources.TrackMatcher
 import com.music.bitchord.download.Downloads
@@ -492,6 +493,7 @@ fun MediaItem.toSong() = Song(
     downloadFormat = mediaMetadata.extras?.getString(EXTRA_DOWNLOAD_FORMAT),
     sourceQuality = mediaMetadata.extras?.getString(EXTRA_SOURCE_QUALITY),
     appleCatalogId = mediaMetadata.extras?.getString(EXTRA_APPLE_CATALOG_ID),
+    appleLookupError = mediaMetadata.extras?.getString(EXTRA_APPLE_LOOKUP_ERROR),
 )
 
 /** @see Song.fromAutoplay */
@@ -580,6 +582,9 @@ internal const val EXTRA_SOURCE_QUALITY = "bitchord.sourceQuality"
 
 /** Apple's catalogue song id, kept distinct from the addon's playback token. */
 internal const val EXTRA_APPLE_CATALOG_ID = "bitchord.appleCatalogId"
+
+/** Why Apple Rich Mode could not attach an exact catalogue id to this row. */
+internal const val EXTRA_APPLE_LOOKUP_ERROR = "bitchord.appleLookupError"
 
 /**
  * How long the track runs, as the row that queued it said.
@@ -785,6 +790,14 @@ fun Song.toMediaItem(parentBrowseId: String? = null, playLocalFile: Boolean = tr
         // option either.
         sourceTrack != null -> SourceRegistry.trackUri(sourceTrack.first, sourceTrack.second)
             .let { "$it${matchQuery()}" }
+        // A discovery row enriched with Apple's exact catalogue id is opened
+        // through the configured Apple addon. The media id stays the original
+        // Spotify/YouTube id, so history and queue identity do not change, but
+        // no lookup or cross-source matcher runs on the loader thread.
+        appleCatalogId != null && AppSettings.appleRichModeEnabled ->
+            SourceRegistry.appleCatalogConfig()?.id?.let { appleConfigId ->
+                SourceRegistry.trackUri(appleConfigId, appleCatalogId).let { "$it${matchQuery()}" }
+            } ?: "bitchord://watch?v=$videoId${matchQuery()}"
         // A track the listener reverted by hand stays reverted — see
         // [OriginalVersion]. Applied here rather than at the one menu that
         // reverts, because "stays" has to mean the next queue entry built for
@@ -851,7 +864,7 @@ fun Song.toMediaItem(parentBrowseId: String? = null, playLocalFile: Boolean = tr
                 if (queueTier != QueueTier.CONTEXT || queueEntryId != null || fromAutoplay ||
                     offlineUri != null || durationText != null || downloadFormat != null ||
                     sourceQuality != null || appleCatalogId != null ||
-                    artistId != null || albumId != null || setVideoId != null ||
+                    appleLookupError != null || artistId != null || albumId != null || setVideoId != null ||
                     isExplicit != null || isVideo || isVideoOrigin || radioName != null ||
                     playbackSource != null || playbackSourceType != null || playbackSourceId != null ||
                     parentBrowseId != null
@@ -877,6 +890,7 @@ fun Song.toMediaItem(parentBrowseId: String? = null, playLocalFile: Boolean = tr
                             EXTRA_DOWNLOAD_FORMAT to formatBadge,
                             EXTRA_SOURCE_QUALITY to sourceQuality,
                             EXTRA_APPLE_CATALOG_ID to appleCatalogId,
+                            EXTRA_APPLE_LOOKUP_ERROR to appleLookupError,
                             EXTRA_DURATION to durationText,
                             EXTRA_ARTIST_ID to artistId,
                             EXTRA_ALBUM_ID to albumId,

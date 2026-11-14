@@ -1,5 +1,7 @@
 package com.music.bitchord
 
+import com.music.bitchord.data.settings.AppSettings
+import com.music.bitchord.data.settings.HomeProvider
 import com.music.bitchord.data.sources.SourceCatalogRole
 import com.music.bitchord.data.sources.SourceConfig
 import com.music.bitchord.data.sources.SourceKind
@@ -65,7 +67,9 @@ class PlaybackFallbackTest {
     @Test
     fun `Apple source failure never falls back to metadata matched YouTube`() {
         val previous = SourceRegistry.configs.value
+        val previousProvider = AppSettings.homeProvider.value
         try {
+            AppSettings.homeProvider.value = HomeProvider.APPLE
             SourceRegistry.configs.value = listOf(
                 SourceConfig(
                     id = "apple-config",
@@ -82,6 +86,7 @@ class PlaybackFallbackTest {
                 ),
             )
         } finally {
+            AppSettings.homeProvider.value = previousProvider
             SourceRegistry.configs.value = previous
         }
     }

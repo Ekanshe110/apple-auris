@@ -98,7 +98,6 @@ import com.music.bitchord.data.smb.SmbRepository
 import com.music.bitchord.data.webdav.WebDavRepository
 import com.music.bitchord.data.settings.AudioQuality
 import com.music.bitchord.data.sources.AddonSource
-import com.music.bitchord.data.sources.SourceCatalogRole
 import com.music.bitchord.data.sources.SourceConfig
 import com.music.bitchord.data.sources.SourceHealth
 import com.music.bitchord.data.sources.SourceKind
@@ -1157,7 +1156,6 @@ internal fun SourceEditorAlert(
 ) {
     val isNew = SourceRegistry.config(config.id) == null
     var baseUrl by remember { mutableStateOf(config.baseUrl) }
-    var catalogRole by remember { mutableStateOf(config.catalogRole) }
     var busy by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
     var statusIsGood by remember { mutableStateOf(false) }
@@ -1293,7 +1291,6 @@ internal fun SourceEditorAlert(
                 // manifest default rather than sending an empty parameter.
                 val toStore = found.copy(
                     settings = secretValues.filterValues { it.isNotBlank() },
-                    catalogRole = catalogRole,
                 )
                 if (isNew) SourceRegistry.add(toStore) else SourceRegistry.update(toStore)
                 onSaved()
@@ -1318,10 +1315,6 @@ internal fun SourceEditorAlert(
             status = null
             secretSettings = emptyList()
             secretValues.clear()
-            // The role described the old server. A different address must be
-            // marked again rather than silently treated as the same Apple
-            // catalogue.
-            catalogRole = SourceCatalogRole.GENERIC
         },
         urlPlaceholder = "https://my-addon.example.com",
         status = status,
@@ -1341,39 +1334,6 @@ internal fun SourceEditorAlert(
                 isPassword = true,
                 help = setting.help,
             )
-        },
-        extraContent = {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        text = "Apple Music catalog",
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-                    Text(
-                        text = "Use this addon's native Apple song IDs",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(
-                    checked = catalogRole == SourceCatalogRole.APPLE_MUSIC,
-                    onCheckedChange = { checked ->
-                        catalogRole = if (checked) {
-                            SourceCatalogRole.APPLE_MUSIC
-                        } else {
-                            SourceCatalogRole.GENERIC
-                        }
-                    },
-                    colors = SwitchDefaults.colors(
-                        checkedTrackColor = MaterialTheme.colorScheme.primary,
-                        checkedBorderColor = MaterialTheme.colorScheme.primary,
-                    ),
-                )
-            }
         },
     )
 }

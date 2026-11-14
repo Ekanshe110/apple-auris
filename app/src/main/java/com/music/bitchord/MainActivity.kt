@@ -1143,7 +1143,7 @@ private fun BitChordApp(
                     it.catalogRole == com.music.bitchord.data.sources.SourceCatalogRole.APPLE_MUSIC
             }
             AppleCatalogUiState(
-                ready = AppSettings.appleCatalogEnabled.value && config != null,
+                ready = AppSettings.appleRichModeEnabled && config != null,
                 config = config,
             )
         }
@@ -2539,6 +2539,7 @@ private fun BitChordApp(
                 title = item.title,
                 artist = InnertubeParser.artistFromSubtitle(item.subtitle),
                 thumbnailUrl = item.thumbnailUrl,
+                appleCatalogId = item.appleCatalogId,
             )
         }
     }
@@ -4537,6 +4538,7 @@ private fun BitChordApp(
                                                 title = item.title,
                                                 artist = InnertubeParser.artistFromSubtitle(item.subtitle),
                                                 thumbnailUrl = item.thumbnailUrl,
+                                                appleCatalogId = item.appleCatalogId,
                                             ),
                                             QueueSource(
                                                 category.title,
@@ -5038,6 +5040,7 @@ private fun BitChordApp(
                                                 title = item.title,
                                                 artist = InnertubeParser.artistFromSubtitle(item.subtitle),
                                                 thumbnailUrl = item.thumbnailUrl,
+                                                appleCatalogId = item.appleCatalogId,
                                             ),
                                             QueueSource(
                                                 category.title,
@@ -5126,6 +5129,7 @@ private fun BitChordApp(
                                         subtitle = song.artist.ifEmpty { "" },
                                         artworkUrl = song.thumbnailUrl,
                                         entityType = EntityType.TRACK,
+                                        appleCatalogId = song.appleCatalogId,
                                     ))
                                     playRadio(song, QueueSource(searchLabel, PlaybackSourceType.SEARCH))
                                 }
@@ -5139,6 +5143,7 @@ private fun BitChordApp(
                                     subtitle = song.artist.ifEmpty { "" },
                                     artworkUrl = song.thumbnailUrl,
                                     entityType = EntityType.TRACK,
+                                    appleCatalogId = song.appleCatalogId,
                                 ))
                                 playRadio(song, QueueSource(searchLabel, PlaybackSourceType.SEARCH))
                             },
@@ -5149,6 +5154,7 @@ private fun BitChordApp(
                                     subtitle = song.artist.ifEmpty { "" },
                                     artworkUrl = song.thumbnailUrl,
                                     entityType = EntityType.TRACK,
+                                    appleCatalogId = song.appleCatalogId,
                                 ))
                                 viewModel.loadPlaylists()
                                 playlistTarget = listOf(song)
@@ -5218,6 +5224,7 @@ private fun BitChordApp(
                                                 title = entity.title,
                                                 artist = entity.subtitle,
                                                 thumbnailUrl = entity.artworkUrl,
+                                                appleCatalogId = entity.appleCatalogId,
                                             ),
                                             QueueSource(entity.title, PlaybackSourceType.SEARCH),
                                         )

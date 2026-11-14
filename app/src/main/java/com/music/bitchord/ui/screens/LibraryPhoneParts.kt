@@ -22,6 +22,7 @@ import com.music.bitchord.sharedui.resources.Res
 import com.music.bitchord.sharedui.resources.spotify_logo
 import com.music.bitchord.data.model.ShelfItem
 import com.music.bitchord.data.settings.AppSettings
+import com.music.bitchord.data.settings.HomeProvider
 import com.music.bitchord.data.sources.SourceCatalogRole
 import com.music.bitchord.data.sources.SourceKind
 import com.music.bitchord.data.sources.SourceRegistry
@@ -51,9 +52,9 @@ fun libraryLinks(): List<LibraryLink> {
     val smbShare by AppSettings.smbShare.collectAsStateWithLifecycle()
     val showCacheFolder by AppSettings.showCacheFolder.collectAsStateWithLifecycle()
     val spotifyConnected by AppSettings.spotifySpdcToken.collectAsStateWithLifecycle()
-    val appleCatalogEnabled by AppSettings.appleCatalogEnabled.collectAsStateWithLifecycle()
+    val homeProvider by AppSettings.homeProvider.collectAsStateWithLifecycle()
     val sourceConfigs by SourceRegistry.configs.collectAsStateWithLifecycle()
-    val appleLibraryConfigured = appleCatalogEnabled && sourceConfigs.any {
+    val appleLibraryConfigured = homeProvider == HomeProvider.APPLE && sourceConfigs.any {
         it.kind == SourceKind.ADDON &&
             it.enabled &&
             it.isComplete &&

@@ -95,8 +95,21 @@ class AddonSource(
         return !shutOut(what)
     }
 
-    private fun recordPolicy(manifest: AddonManifest) =
-        SourceRegistry.updatePolicy(config.id, manifest.downloadsAllowed, manifest.requiresLosslessOutput)
+    private fun recordPolicy(manifest: AddonManifest) {
+        val role = manifest.library?.let { capability ->
+            when {
+                capability.isAppleMusic -> com.music.bitchord.data.sources.SourceCatalogRole.APPLE_MUSIC
+                capability.provider.isNotBlank() -> com.music.bitchord.data.sources.SourceCatalogRole.GENERIC
+                else -> null
+            }
+        }
+        SourceRegistry.updatePolicy(
+            configId = config.id,
+            allowDownloads = manifest.downloadsAllowed,
+            checkValidLossless = manifest.requiresLosslessOutput,
+            catalogRole = role,
+        )
+    }
 
     // ── Health ────────────────────────────────────────────────────────────
 

@@ -72,7 +72,6 @@ object SettingsCatalog {
         ),
         SettingsCategory.AUDIO to listOf(
             "audio.source",
-            "audio.apple_catalog",
             "audio.offline_mode",
             "audio.wifi",
             "audio.mobile_data",
@@ -87,6 +86,7 @@ object SettingsCatalog {
             "audio.jamesdsp",
         ),
         SettingsCategory.PLAYBACK to listOf(
+            "playback.content_source",
             "playback.prefer_music_only",
             "playback.crossfade",
             "playback.automix",
