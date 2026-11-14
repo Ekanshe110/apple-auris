@@ -16,7 +16,7 @@ import kotlin.math.roundToInt
  */
 /** Whether a Feature Unit readback proves that SET_CUR changed its volume. */
 internal fun featureVolumeReadbackProvesWritable(original: Int?, updated: Int?): Boolean =
-    updated != null && updated != original
+    original != null && updated != null && updated != original
 
 class UacFeatureVolume(
     private val connection: UsbDeviceConnection,
